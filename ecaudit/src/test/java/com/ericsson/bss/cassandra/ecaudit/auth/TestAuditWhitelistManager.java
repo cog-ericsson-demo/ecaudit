@@ -40,6 +40,7 @@ import org.apache.cassandra.auth.RoleResource;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.UnauthorizedException;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
@@ -47,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -279,6 +281,158 @@ public class TestAuditWhitelistManager
         RoleOptions options = new RoleOptions();
 
         whitelistManager.alterRoleOption(performer, role, options);
+    }
+
+    @Test
+    public void testDefaultConstructorUsesWhitelistDataAccessSingleton()
+    {
+        try (MockedStatic<WhitelistDataAccess> staticWhitelistDataAccess = mockStatic(WhitelistDataAccess.class))
+        {
+            staticWhitelistDataAccess.when(WhitelistDataAccess::getInstance).thenReturn(mockWhitelistDataAccess);
+
+            AuditWhitelistManager defaultWhitelistManager = new AuditWhitelistManager();
+            defaultWhitelistManager.setup();
+
+            staticWhitelistDataAccess.verify(WhitelistDataAccess::getInstance, times(1));
+        }
+
+        verify(mockWhitelistDataAccess, times(1)).setup();
+    }
+
+    @Test
+    public void testGrantAllOperationsAtAlter()
+    {
+        when(performer.getPermissions(any())).thenReturn(ImmutableSet.of(Permission.AUTHORIZE));
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("grant_audit_whitelist_for_all", "connections"));
+
+        whitelistManager.alterRoleOption(performer, role, options);
+
+        ConnectionResource connectionResource = ConnectionResource.fromName("connections");
+        verify(mockWhitelistDataAccess, times(1))
+        .addToWhitelist(eq(role), eq(connectionResource), eq(connectionResource.applicablePermissions()));
+    }
+
+    @Test
+    public void testGrantOnGrantBasedResourceAtAlterIsDenied()
+    {
+        DataResource dataResource = DataResource.fromName("data/myks");
+        when(performer.getPermissions(eq(dataResource))).thenReturn(ImmutableSet.of(Permission.MODIFY, Permission.SELECT));
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("grant_audit_whitelist_for_modify", "grants/data/myks"));
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> whitelistManager.alterRoleOption(performer, role, options))
+        .withMessageContaining("User bob is not authorized to whitelist access to");
+    }
+
+    @Test
+    public void testRevokeAtAlterIsAllowedBySuperUser()
+    {
+        when(performer.isSuper()).thenReturn(true);
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("revoke_audit_whitelist_for_select", "data/myks"));
+
+        whitelistManager.alterRoleOption(performer, role, options);
+
+        verify(mockWhitelistDataAccess, times(1))
+        .removeFromWhitelist(eq(role), eq(DataResource.fromName("data/myks")), eq(ImmutableSet.of(Permission.SELECT)));
+    }
+
+    @Test
+    public void testMigrateAtAlter()
+    {
+        when(performer.isSuper()).thenReturn(true);
+        when(role.getRoleName()).thenReturn("bob");
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("migrate_audit_whitelist_table", "now"));
+
+        whitelistManager.alterRoleOption(performer, role, options);
+
+        verify(mockWhitelistDataAccess, times(1)).migrateTableData();
+    }
+
+    @Test
+    public void testMigrateAtAlterByOrdinaryUserIsDenied()
+    {
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("migrate_audit_whitelist_table", "now"));
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> whitelistManager.alterRoleOption(performer, role, options))
+        .withMessageContaining("Only super-user can migrate audit whitelist data");
+    }
+
+    @Test
+    public void testMigrateAtAlterOnOtherRoleIsDenied()
+    {
+        when(performer.isSuper()).thenReturn(true);
+        when(role.getRoleName()).thenReturn("alice");
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("migrate_audit_whitelist_table", "now"));
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> whitelistManager.alterRoleOption(performer, role, options))
+        .withMessageContaining("Migrate audit whitelist options is only valid on your own user name");
+    }
+
+    @Test
+    public void testMigrateAtAlterWithInvalidValueIsRejected()
+    {
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("migrate_audit_whitelist_table", "later"));
+
+        assertThatExceptionOfType(InvalidRequestException.class)
+        .isThrownBy(() -> whitelistManager.alterRoleOption(performer, role, options))
+        .withMessageContaining("Audit whitelist data will only be migrated if value is set to [now]");
+    }
+
+    @Test
+    public void testDemigrateAtAlter()
+    {
+        when(performer.isSuper()).thenReturn(true);
+        when(role.getRoleName()).thenReturn("bob");
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("syncback_audit_whitelist_table", "now"));
+
+        whitelistManager.alterRoleOption(performer, role, options);
+
+        verify(mockWhitelistDataAccess, times(1)).demigrateTableData();
+    }
+
+    @Test
+    public void testDemigrateAtAlterByOrdinaryUserIsDenied()
+    {
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("syncback_audit_whitelist_table", "now"));
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> whitelistManager.alterRoleOption(performer, role, options))
+        .withMessageContaining("Only super-user can migrate audit whitelist data");
+    }
+
+    @Test
+    public void testDemigrateAtAlterOnOtherRoleIsDenied()
+    {
+        when(performer.isSuper()).thenReturn(true);
+        when(role.getRoleName()).thenReturn("alice");
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("syncback_audit_whitelist_table", "now"));
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> whitelistManager.alterRoleOption(performer, role, options))
+        .withMessageContaining("Migrate audit whitelist options is only valid on your own user name");
+    }
+
+    @Test
+    public void testDemigrateAtAlterWithInvalidValueIsRejected()
+    {
+        RoleOptions options = createRoleOptions(
+                Collections.singletonMap("syncback_audit_whitelist_table", "later"));
+
+        assertThatExceptionOfType(InvalidRequestException.class)
+        .isThrownBy(() -> whitelistManager.alterRoleOption(performer, role, options))
+        .withMessageContaining("Audit whitelist data will only be migrated if value is set to [now]");
     }
 
     @Test
