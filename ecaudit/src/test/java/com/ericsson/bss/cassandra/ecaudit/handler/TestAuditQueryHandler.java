@@ -36,13 +36,17 @@ import org.apache.cassandra.cql3.BatchQueryOptions;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QueryHandler;
 import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
+import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.exceptions.UnavailableException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Dispatcher;
+import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.transport.messages.ResultMessage.Prepared;
 import org.apache.cassandra.utils.MD5Digest;
 import org.mockito.ArgumentCaptor;
@@ -54,6 +58,7 @@ import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -95,6 +100,9 @@ public class TestAuditQueryHandler
 
     @Captor
     private ArgumentCaptor<UUID> uuidCaptor;
+
+    @Captor
+    private ArgumentCaptor<Long> timestampCaptor;
 
     private AuditQueryHandler queryHandler;
 
@@ -298,6 +306,272 @@ public class TestAuditQueryHandler
         QueryHandler.Prepared prepared = queryHandler.getPrepared(statementId);
         assertThat(prepared).isNull();
         verify(mockHandler, times(1)).getPrepared(statementId);
+    }
+
+    @Test
+    public void testDefaultConstructorWrapsQueryProcessor()
+    {
+        MD5Digest unknownStatementId = MD5Digest.compute("select id from ks.ts where id = ?");
+        assertThat(QueryProcessor.instance.getPrepared(unknownStatementId)).isNull();
+
+        AuditQueryHandler defaultQueryHandler = new AuditQueryHandler();
+
+        assertThat(defaultQueryHandler.getPrepared(unknownStatementId)).isNull();
+    }
+
+    @Test
+    public void testConstructorWithQueryHandlerWrapsGivenHandler()
+    {
+        String query = "select id from ks.ts where id = ?";
+        MD5Digest statementId = MD5Digest.compute(query);
+        QueryHandler.Prepared parsedPrepared = new QueryHandler.Prepared(mockStatement, query, false, "ks");
+        when(mockHandler.getPrepared(statementId)).thenReturn(parsedPrepared);
+
+        AuditQueryHandler wrappingQueryHandler = new AuditQueryHandler(mockHandler);
+
+        assertThat(wrappingQueryHandler.getPrepared(statementId)).isSameAs(parsedPrepared);
+        verify(mockHandler, times(1)).getPrepared(eq(statementId));
+    }
+
+    @Test
+    public void testPrepareFailed()
+    {
+        String query = "select id from ks.ts where id = ?";
+        InvalidRequestException failure = new InvalidRequestException("keyspace ks does not exist");
+        when(mockHandler.prepare(query, mockClientState, customPayload)).thenThrow(failure);
+
+        assertThatThrownBy(() -> queryHandler.prepare(query, mockClientState, customPayload)).isSameAs(failure);
+
+        verify(mockHandler, times(1)).prepare(eq(query), eq(mockClientState), eq(customPayload));
+        verify(mockAdapter, times(1)).auditPrepare(eq(query), eq(mockClientState), eq(Status.ATTEMPT), timestampCaptor.capture());
+        assertThat(isCloseToNow().matches(timestampCaptor.getValue())).isTrue();
+        verify(mockAdapter, times(1)).auditPrepare(eq(query), eq(mockClientState), eq(Status.FAILED), eq(timestampCaptor.getValue()));
+    }
+
+    @Test
+    public void testParseFailed()
+    {
+        String query = "select * fom ks.ts";
+        SyntaxException failure = new SyntaxException("no viable alternative at input 'fom'");
+        when(mockHandler.parse(query, mockQueryState, mockOptions)).thenThrow(failure);
+
+        assertThatThrownBy(() -> queryHandler.parse(query, mockQueryState, mockOptions)).isSameAs(failure);
+
+        verify(mockHandler, times(1)).parse(eq(query), eq(mockQueryState), eq(mockOptions));
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.ATTEMPT), timestampCaptor.capture());
+        assertThat(isCloseToNow().matches(timestampCaptor.getValue())).isTrue();
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.FAILED), eq(timestampCaptor.getValue()));
+    }
+
+    @Test
+    public void testParseFailedIsNotAuditedWithNextQuery()
+    {
+        String failedQuery = "select * fom ks.ts";
+        String query = "select * from ks.ts";
+        when(mockHandler.parse(failedQuery, mockQueryState, mockOptions)).thenThrow(new SyntaxException("no viable alternative at input 'fom'"));
+        when(mockHandler.parse(query, mockQueryState, mockOptions)).thenReturn(mockStatement);
+
+        assertThatExceptionOfType(SyntaxException.class)
+                .isThrownBy(() -> queryHandler.parse(failedQuery, mockQueryState, mockOptions));
+        CQLStatement statement = queryHandler.parse(query, mockQueryState, mockOptions);
+        queryHandler.process(statement, mockQueryState, mockOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        verify(mockHandler, times(1)).parse(eq(failedQuery), eq(mockQueryState), eq(mockOptions));
+        verify(mockAdapter, times(1)).auditRegular(eq(failedQuery), eq(mockClientState), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockAdapter, times(1)).auditRegular(eq(failedQuery), eq(mockClientState), eq(Status.FAILED), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).parse(eq(query), eq(mockQueryState), eq(mockOptions));
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).process(eq(mockStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.SUCCEEDED), longThat(isCloseToNow()));
+    }
+
+    @Test
+    public void testProcessReturnsResultAndReusesTimestampFromParse()
+    {
+        String query = "select * from ks.ts";
+        ResultMessage expectedResult = new ResultMessage.Void();
+        when(mockHandler.parse(query, mockQueryState, mockOptions)).thenReturn(mockStatement);
+        when(mockHandler.process(eq(mockStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class)))
+                .thenReturn(expectedResult);
+
+        CQLStatement statement = queryHandler.parse(query, mockQueryState, mockOptions);
+        ResultMessage result = queryHandler.process(statement, mockQueryState, mockOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        assertThat(statement).isSameAs(mockStatement);
+        assertThat(result).isSameAs(expectedResult);
+        verify(mockHandler, times(1)).parse(eq(query), eq(mockQueryState), eq(mockOptions));
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.ATTEMPT), timestampCaptor.capture());
+        verify(mockHandler, times(1)).process(eq(mockStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.SUCCEEDED), eq(timestampCaptor.getValue()));
+    }
+
+    @Test
+    public void testProcessFailedIsNotAuditedWithNextQuery()
+    {
+        String failedQuery = "select * from ks.unavailable";
+        String query = "select * from ks.ts";
+        CQLStatement failedStatement = Mockito.mock(CQLStatement.class);
+        when(mockHandler.parse(failedQuery, mockQueryState, mockOptions)).thenReturn(failedStatement);
+        when(mockHandler.parse(query, mockQueryState, mockOptions)).thenReturn(mockStatement);
+        whenProcessThrowUnavailable(failedStatement);
+
+        queryHandler.parse(failedQuery, mockQueryState, mockOptions);
+        assertThatExceptionOfType(UnavailableException.class)
+                .isThrownBy(() -> queryHandler.process(failedStatement, mockQueryState, mockOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution()));
+        queryHandler.parse(query, mockQueryState, mockOptions);
+        queryHandler.process(mockStatement, mockQueryState, mockOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        verify(mockHandler, times(1)).parse(eq(failedQuery), eq(mockQueryState), eq(mockOptions));
+        verify(mockAdapter, times(1)).auditRegular(eq(failedQuery), eq(mockClientState), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).process(eq(failedStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditRegular(eq(failedQuery), eq(mockClientState), eq(Status.FAILED), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).parse(eq(query), eq(mockQueryState), eq(mockOptions));
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).process(eq(mockStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditRegular(eq(query), eq(mockClientState), eq(Status.SUCCEEDED), longThat(isCloseToNow()));
+    }
+
+    @Test
+    public void testProcessPreparedReturnsResultAndUsesSameTimestampForAttemptAndSucceeded()
+    {
+        String query = "select id from ks.ts where id = ?";
+        MD5Digest statementId = MD5Digest.compute(query);
+        QueryHandler.Prepared parsedPrepared = new QueryHandler.Prepared(mockStatement, query, false, "ks");
+        ResultMessage expectedResult = new ResultMessage.Void();
+        when(mockHandler.getPrepared(statementId)).thenReturn(parsedPrepared);
+        when(mockHandler.processPrepared(eq(mockStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class)))
+                .thenReturn(expectedResult);
+
+        CQLStatement stmt = queryHandler.getPrepared(statementId).statement;
+        ResultMessage result = queryHandler.processPrepared(stmt, mockQueryState, mockOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        assertThat(result).isSameAs(expectedResult);
+        verify(mockHandler, times(1)).getPrepared(eq(statementId));
+        verify(mockAdapter, times(1)).auditPrepared(eq(query), eq(mockStatement), eq(mockClientState), eq(mockOptions), eq(Status.ATTEMPT), timestampCaptor.capture());
+        verify(mockHandler, times(1)).processPrepared(eq(mockStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditPrepared(eq(query), eq(mockStatement), eq(mockClientState), eq(mockOptions), eq(Status.SUCCEEDED), eq(timestampCaptor.getValue()));
+    }
+
+    @Test
+    public void testProcessPreparedFailedIsNotAuditedWithNextQuery()
+    {
+        String failedQuery = "select id from ks.unavailable where id = ?";
+        MD5Digest failedStatementId = MD5Digest.compute(failedQuery);
+        QueryHandler.Prepared failedPrepared = new QueryHandler.Prepared(mockStatement, failedQuery, false, "ks");
+
+        String query = "select id from ks.ts where id = ?";
+        MD5Digest statementId = MD5Digest.compute(query);
+        CQLStatement statement = Mockito.mock(CQLStatement.class);
+        QueryHandler.Prepared parsedPrepared = new QueryHandler.Prepared(statement, query, false, "ks");
+
+        when(mockHandler.getPrepared(failedStatementId)).thenReturn(failedPrepared);
+        when(mockHandler.getPrepared(statementId)).thenReturn(parsedPrepared);
+        whenProcessPreparedThrowUnavailable();
+
+        CQLStatement failedStmt = queryHandler.getPrepared(failedStatementId).statement;
+        assertThatExceptionOfType(UnavailableException.class)
+                .isThrownBy(() -> queryHandler.processPrepared(failedStmt, mockQueryState, mockOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution()));
+        CQLStatement stmt = queryHandler.getPrepared(statementId).statement;
+        queryHandler.processPrepared(stmt, mockQueryState, mockOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        verify(mockHandler, times(1)).getPrepared(eq(failedStatementId));
+        verify(mockAdapter, times(1)).auditPrepared(eq(failedQuery), eq(mockStatement), eq(mockClientState), eq(mockOptions), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).processPrepared(eq(mockStatement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditPrepared(eq(failedQuery), eq(mockStatement), eq(mockClientState), eq(mockOptions), eq(Status.FAILED), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).getPrepared(eq(statementId));
+        verify(mockAdapter, times(1)).auditPrepared(eq(query), eq(statement), eq(mockClientState), eq(mockOptions), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).processPrepared(eq(statement), eq(mockQueryState), eq(mockOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditPrepared(eq(query), eq(statement), eq(mockClientState), eq(mockOptions), eq(Status.SUCCEEDED), longThat(isCloseToNow()));
+    }
+
+    @Test
+    public void testProcessBatchReturnsResultAndUsesSameBatchIdAndTimestampForAttemptAndSucceeded()
+    {
+        String query = "INSERT INTO ks.ts (id, value) VALUES (?, 'abc')";
+        MD5Digest statementId = MD5Digest.compute(query);
+        QueryHandler.Prepared parsedPrepared = new QueryHandler.Prepared(mockStatement, query, false, "ks");
+        ResultMessage expectedResult = new ResultMessage.Void();
+        when(mockHandler.processBatch(eq(mockBatchStatement), eq(mockQueryState), eq(mockBatchOptions), eq(customPayload), any(Dispatcher.RequestTime.class)))
+                .thenReturn(expectedResult);
+
+        givenBatchOfTwoStatementsArePrepared(statementId, parsedPrepared);
+
+        ResultMessage result = queryHandler.processBatch(mockBatchStatement, mockQueryState, mockBatchOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        assertThat(result).isSameAs(expectedResult);
+        verify(mockHandler, times(2)).getPrepared(eq(statementId));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(query, query)), uuidCaptor.capture(), eq(mockClientState), eq(mockBatchOptions), eq(Status.ATTEMPT), timestampCaptor.capture());
+        verify(mockHandler, times(1)).processBatch(eq(mockBatchStatement), eq(mockQueryState), eq(mockBatchOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(query, query)), eq(uuidCaptor.getValue()), eq(mockClientState), eq(mockBatchOptions), eq(Status.SUCCEEDED), eq(timestampCaptor.getValue()));
+    }
+
+    @Test
+    public void testProcessBatchFailedUsesSameBatchIdAndTimestampForAttemptAndFailed()
+    {
+        String query = "INSERT INTO ks.ts (id, value) VALUES (?, 'abc')";
+        MD5Digest statementId = MD5Digest.compute(query);
+        QueryHandler.Prepared parsedPrepared = new QueryHandler.Prepared(mockStatement, query, false, "ks");
+
+        givenBatchOfTwoStatementsArePrepared(statementId, parsedPrepared);
+        whenProcessBatchThrowUnavailable();
+
+        assertThatExceptionOfType(UnavailableException.class)
+                .isThrownBy(() -> queryHandler.processBatch(mockBatchStatement, mockQueryState, mockBatchOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution()));
+
+        verify(mockHandler, times(2)).getPrepared(eq(statementId));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(query, query)), uuidCaptor.capture(), eq(mockClientState), eq(mockBatchOptions), eq(Status.ATTEMPT), timestampCaptor.capture());
+        verify(mockHandler, times(1)).processBatch(eq(mockBatchStatement), eq(mockQueryState), eq(mockBatchOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(query, query)), eq(uuidCaptor.getValue()), eq(mockClientState), eq(mockBatchOptions), eq(Status.FAILED), eq(timestampCaptor.getValue()));
+    }
+
+    @Test
+    public void testProcessBatchFailedIsNotAuditedWithNextBatch()
+    {
+        String failedQuery = "INSERT INTO ks.unavailable (id, value) VALUES (?, 'abc')";
+        MD5Digest failedStatementId = MD5Digest.compute(failedQuery);
+        QueryHandler.Prepared failedPrepared = new QueryHandler.Prepared(mockStatement, failedQuery, false, "ks");
+
+        String query = "INSERT INTO ks.ts (id, value) VALUES (?, 'abc')";
+        MD5Digest statementId = MD5Digest.compute(query);
+        QueryHandler.Prepared parsedPrepared = new QueryHandler.Prepared(mockStatement, query, false, "ks");
+
+        when(mockHandler.processBatch(eq(mockBatchStatement), eq(mockQueryState), eq(mockBatchOptions), eq(customPayload), any(Dispatcher.RequestTime.class)))
+                .thenThrow(UnavailableException.class)
+                .thenReturn(null);
+
+        givenBatchOfTwoStatementsArePrepared(failedStatementId, failedPrepared);
+        assertThatExceptionOfType(UnavailableException.class)
+                .isThrownBy(() -> queryHandler.processBatch(mockBatchStatement, mockQueryState, mockBatchOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution()));
+        givenBatchOfTwoStatementsArePrepared(statementId, parsedPrepared);
+        queryHandler.processBatch(mockBatchStatement, mockQueryState, mockBatchOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        verify(mockHandler, times(2)).getPrepared(eq(failedStatementId));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(failedQuery, failedQuery)), any(UUID.class), eq(mockClientState), eq(mockBatchOptions), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(failedQuery, failedQuery)), any(UUID.class), eq(mockClientState), eq(mockBatchOptions), eq(Status.FAILED), longThat(isCloseToNow()));
+        verify(mockHandler, times(2)).getPrepared(eq(statementId));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(query, query)), any(UUID.class), eq(mockClientState), eq(mockBatchOptions), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Arrays.asList(query, query)), any(UUID.class), eq(mockClientState), eq(mockBatchOptions), eq(Status.SUCCEEDED), longThat(isCloseToNow()));
+        verify(mockHandler, times(2)).processBatch(eq(mockBatchStatement), eq(mockQueryState), eq(mockBatchOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
+    }
+
+    @Test
+    public void testPreparedStatementsAreTrackedPerThread() throws InterruptedException
+    {
+        String query = "INSERT INTO ks.ts (id, value) VALUES (?, 'abc')";
+        MD5Digest statementId = MD5Digest.compute(query);
+        QueryHandler.Prepared parsedPrepared = new QueryHandler.Prepared(mockStatement, query, false, "ks");
+        when(mockHandler.getPrepared(eq(statementId))).thenReturn(parsedPrepared);
+
+        Thread otherThread = new Thread(() -> queryHandler.getPrepared(statementId));
+        otherThread.start();
+        otherThread.join();
+
+        queryHandler.processBatch(mockBatchStatement, mockQueryState, mockBatchOptions, customPayload, Dispatcher.RequestTime.forImmediateExecution());
+
+        verify(mockHandler, times(1)).getPrepared(eq(statementId));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Collections.emptyList()), any(UUID.class), eq(mockClientState), eq(mockBatchOptions), eq(Status.ATTEMPT), longThat(isCloseToNow()));
+        verify(mockAdapter, times(1)).auditBatch(eq(mockBatchStatement), eq(Collections.emptyList()), any(UUID.class), eq(mockClientState), eq(mockBatchOptions), eq(Status.SUCCEEDED), longThat(isCloseToNow()));
+        verify(mockHandler, times(1)).processBatch(eq(mockBatchStatement), eq(mockQueryState), eq(mockBatchOptions), eq(customPayload), any(Dispatcher.RequestTime.class));
     }
 
     private void givenBatchOfTwoStatementsArePrepared(MD5Digest statementId, QueryHandler.Prepared parsedPrepared)
