@@ -79,6 +79,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
@@ -203,6 +204,77 @@ public class TestAuditAdapter
     }
 
     @Test
+    public void testProcessPrepare()
+    {
+        // Given
+        when(mockAuditor.shouldLogPrepareStatements()).thenReturn(true);
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createEntryBuilder(eq(PREPARED_STATEMENT), eq(mockState))).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.auditPrepare(PREPARED_STATEMENT, mockState, Status.ATTEMPT, TIMESTAMP);
+
+        // Then
+        AuditEntry entry = getAuditEntry();
+        assertThat(entry.getClientAddress()).isEqualTo(clientSocketAddress);
+        assertThat(entry.getCoordinatorAddress()).isEqualTo(FBUtilities.getJustBroadcastAddress());
+        assertThat(entry.getOperation().getOperationString()).isEqualTo("Prepared: " + PREPARED_STATEMENT);
+        assertThat(entry.getOperation().getNakedOperationString()).isEqualTo("Prepared: " + PREPARED_STATEMENT);
+        assertThat(entry.getUser()).isEqualTo(USER);
+        assertThat(entry.getStatus()).isEqualTo(Status.ATTEMPT);
+        assertThat(entry.getBatchId()).isEmpty();
+        assertThat(entry.getPermissions()).isEqualTo(PERMISSIONS);
+        assertThat(entry.getResource()).isEqualTo(RESOURCE);
+        assertThat(entry.getTimestamp()).isEqualTo(TIMESTAMP);
+    }
+
+    @Test
+    public void testProcessPrepareFailed()
+    {
+        // Given
+        when(mockAuditor.shouldLogPrepareStatements()).thenReturn(true);
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createEntryBuilder(eq(PREPARED_STATEMENT), eq(mockState))).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.auditPrepare(PREPARED_STATEMENT, mockState, Status.FAILED, TIMESTAMP);
+
+        // Then
+        AuditEntry entry = getAuditEntry();
+        assertThat(entry.getOperation().getOperationString()).isEqualTo("Prepared: " + PREPARED_STATEMENT);
+        assertThat(entry.getStatus()).isEqualTo(Status.FAILED);
+        assertThat(entry.getTimestamp()).isEqualTo(TIMESTAMP);
+    }
+
+    @Test
+    public void testProcessPrepareNoLogTimeStrategy()
+    {
+        // Given
+        when(mockAuditor.shouldLogForStatus(any(Status.class))).thenReturn(false);
+        // When
+        auditAdapter.auditPrepare(PREPARED_STATEMENT, mockState, Status.ATTEMPT, TIMESTAMP);
+        // Then
+        verifyNoMoreInteractions(mockAuditor, mockAuditEntryBuilderFactory);
+    }
+
+    @Test
+    public void testProcessPrepareNoLogPrepareStatements()
+    {
+        // Given
+        when(mockAuditor.shouldLogPrepareStatements()).thenReturn(false);
+        // When
+        auditAdapter.auditPrepare(PREPARED_STATEMENT, mockState, Status.ATTEMPT, TIMESTAMP);
+        // Then
+        verifyNoMoreInteractions(mockAuditor, mockAuditEntryBuilderFactory);
+    }
+
+    @Test
     public void testProcessPrepared()
     {
         // Given
@@ -234,6 +306,58 @@ public class TestAuditAdapter
         assertThat(entry.getPermissions()).isEqualTo(PERMISSIONS);
         assertThat(entry.getResource()).isEqualTo(RESOURCE);
         assertThat(entry.getTimestamp()).isEqualTo(TIMESTAMP);
+    }
+
+    @Test
+    public void testProcessPreparedWithoutColumnSpecifications()
+    {
+        // Given
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+        when(mockOptions.hasColumnSpecifications()).thenReturn(false);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createEntryBuilder(eq(mockStatement))).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.auditPrepared(PREPARED_STATEMENT, mockStatement, mockState, mockOptions, Status.FAILED, TIMESTAMP);
+
+        // Then
+        AuditEntry entry = getAuditEntry();
+        assertThat(entry.getOperation().getOperationString()).isEqualTo(PREPARED_STATEMENT);
+        assertThat(entry.getOperation().getNakedOperationString()).isEqualTo(PREPARED_STATEMENT);
+        assertThat(entry.getStatus()).isEqualTo(Status.FAILED);
+        verifyNoMoreInteractions(mockOptions);
+        verifyNoInteractions(mockBoundValueSuppressor);
+    }
+
+    @Test
+    public void testProcessPreparedWithReplacedBoundValueSuppressor()
+    {
+        // Given
+        String expectedQuery = PREPARED_STATEMENT + "['id1', <text>]";
+        List<ByteBuffer> values = createValues("id1", "val1");
+        ImmutableList<ColumnSpecification> columns = createTextColumns("c1", "c2");
+        BoundValueSuppressor suppressor = (column, value) -> "c2".equals(column.name.toString()) ? Optional.of("<text>") : Optional.empty();
+
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+        when(mockOptions.getValues()).thenReturn(values);
+        when(mockOptions.getColumnSpecifications()).thenReturn(columns);
+        when(mockOptions.hasColumnSpecifications()).thenReturn(true);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createEntryBuilder(eq(mockStatement))).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.setBoundValueSuppressor(suppressor);
+        auditAdapter.auditPrepared(PREPARED_STATEMENT, mockStatement, mockState, mockOptions, Status.ATTEMPT, TIMESTAMP);
+
+        // Then
+        AuditEntry entry = getAuditEntry();
+        assertThat(entry.getOperation().getOperationString()).isEqualTo(expectedQuery);
+        assertThat(entry.getOperation().getNakedOperationString()).isEqualTo(PREPARED_STATEMENT);
+        verifyNoInteractions(mockBoundValueSuppressor);
     }
 
     @Test
@@ -346,6 +470,113 @@ public class TestAuditAdapter
     }
 
     @Test
+    public void testProcessBatchFailedWithoutLogSummaryStrategy()
+    {
+        // Given
+        when(mockAuditor.shouldLogFailedBatchSummary()).thenReturn(false);
+
+        List<Object> expectedQueries = Arrays.asList("query1", "query2");
+
+        when(mockBatchOptions.getQueryOrIdList()).thenReturn(expectedQueries);
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createBatchEntryBuilder()).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.auditBatch(mockBatchStatement, Collections.emptyList(), BATCH_ID, mockState, mockBatchOptions, Status.FAILED, TIMESTAMP);
+
+        // Then
+        List<AuditEntry> entries = getAuditEntries(2);
+        assertThat(entries).extracting(AuditEntry::getBatchId).containsOnly(Optional.of(BATCH_ID));
+        assertThat(entries).extracting(AuditEntry::getStatus).containsOnly(Status.FAILED);
+        assertThat(entries).extracting(AuditEntry::getOperation).extracting(AuditOperation::getOperationString).containsExactly("query1", "query2");
+        assertThat(entries).extracting(AuditEntry::getTimestamp).containsOnly(TIMESTAMP);
+    }
+
+    @Test
+    public void testProcessBatchSucceededIgnoresLogSummaryStrategy()
+    {
+        // Given
+        when(mockBatchOptions.getQueryOrIdList()).thenReturn(singletonList("query1"));
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createBatchEntryBuilder()).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.auditBatch(mockBatchStatement, Collections.emptyList(), BATCH_ID, mockState, mockBatchOptions, Status.SUCCEEDED, TIMESTAMP);
+
+        // Then
+        AuditEntry entry = getAuditEntry();
+        assertThat(entry.getBatchId()).contains(BATCH_ID);
+        assertThat(entry.getStatus()).isEqualTo(Status.SUCCEEDED);
+        assertThat(entry.getOperation().getOperationString()).isEqualTo("query1");
+    }
+
+    @Test
+    public void testProcessBatchWithoutStatements()
+    {
+        // Given
+        when(mockBatchOptions.getQueryOrIdList()).thenReturn(Collections.emptyList());
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createBatchEntryBuilder()).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.auditBatch(mockBatchStatement, Collections.emptyList(), BATCH_ID, mockState, mockBatchOptions, Status.ATTEMPT, TIMESTAMP);
+
+        // Then
+        verify(mockAuditEntryBuilderFactory, times(1)).createBatchEntryBuilder();
+        verifyNoMoreInteractions(mockAuditor, mockAuditEntryBuilderFactory);
+    }
+
+    @Test
+    public void testProcessBatchMixedRegularAndPreparedStatements()
+    {
+        // Given
+        String otherPreparedStatement = "update ts.ks set value = ? where id = ?";
+        ModificationStatement firstPrepared = mock(ModificationStatement.class);
+        ModificationStatement secondPrepared = mock(ModificationStatement.class);
+        QueryOptions firstOptions = mock(QueryOptions.class);
+        QueryOptions secondOptions = mock(QueryOptions.class);
+
+        List<Object> queryOrIds = Arrays.asList("query1", PREPARED_STATEMENT_ID, "query2", MD5Digest.compute(otherPreparedStatement));
+        List<ModificationStatement> statements = Arrays.asList(mock(ModificationStatement.class), firstPrepared, mock(ModificationStatement.class), secondPrepared);
+
+        when(mockBatchOptions.getQueryOrIdList()).thenReturn(queryOrIds);
+        when(mockBatchOptions.forStatement(1)).thenReturn(firstOptions);
+        when(mockBatchOptions.forStatement(3)).thenReturn(secondOptions);
+        when(mockBatchStatement.getStatements()).thenReturn(statements);
+        when(mockUser.getName()).thenReturn(USER);
+        when(mockState.getRemoteAddress()).thenReturn(clientSocketAddress);
+
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(RESOURCE);
+        when(mockAuditEntryBuilderFactory.createBatchEntryBuilder()).thenReturn(entryBuilder);
+
+        // When
+        auditAdapter.auditBatch(mockBatchStatement, Arrays.asList(PREPARED_STATEMENT, otherPreparedStatement), BATCH_ID, mockState, mockBatchOptions, Status.ATTEMPT, TIMESTAMP);
+
+        // Then
+        List<AuditEntry> entries = getAuditEntries(4);
+        assertThat(entries).extracting(AuditEntry::getBatchId).containsOnly(Optional.of(BATCH_ID));
+        assertThat(entries).extracting(AuditEntry::getStatus).containsOnly(Status.ATTEMPT);
+        assertThat(entries).extracting(AuditEntry::getOperation).extracting(AuditOperation::getOperationString)
+                           .containsExactly("query1", PREPARED_STATEMENT, "query2", otherPreparedStatement);
+
+        verify(mockAuditEntryBuilderFactory, times(1)).updateBatchEntryBuilder(eq(entryBuilder), eq("query1"), eq(mockState));
+        verify(mockAuditEntryBuilderFactory, times(1)).updateBatchEntryBuilder(eq(entryBuilder), eq(firstPrepared));
+        verify(mockAuditEntryBuilderFactory, times(1)).updateBatchEntryBuilder(eq(entryBuilder), eq("query2"), eq(mockState));
+        verify(mockAuditEntryBuilderFactory, times(1)).updateBatchEntryBuilder(eq(entryBuilder), eq(secondPrepared));
+        verify(mockAuditEntryBuilderFactory, times(1)).createBatchEntryBuilder();
+        verifyNoMoreInteractions(mockAuditEntryBuilderFactory);
+    }
+
+    @Test
     public void testProcessBatchNoLogTimeStrategy()
     {
         // Given
@@ -385,6 +616,31 @@ public class TestAuditAdapter
     }
 
     @Test
+    public void testProcessAuthWithoutSubject()
+    {
+        // Given
+        ConnectionResource resource = ConnectionResource.root();
+
+        AuditEntry.Builder auditBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(resource);
+        when(mockAuditEntryBuilderFactory.createAuthenticationEntryBuilder()).thenReturn(auditBuilder);
+
+        // When
+        auditAdapter.auditAuth(USER, clientAddress, Status.FAILED, TIMESTAMP);
+
+        // Then
+        AuditEntry entry = getAuditEntry();
+        assertThat(entry.getClientAddress()).isEqualTo(new InetSocketAddress(clientAddress, AuditEntry.UNKNOWN_PORT));
+        assertThat(entry.getCoordinatorAddress()).isEqualTo(FBUtilities.getJustBroadcastAddress());
+        assertThat(entry.getUser()).isEqualTo(USER);
+        assertThat(entry.getOperation().getOperationString()).isEqualTo("Authentication failed");
+        assertThat(entry.getStatus()).isEqualTo(Status.FAILED);
+        assertThat(entry.getBatchId()).isEmpty();
+        assertThat(entry.getResource()).isEqualTo(resource);
+        assertThat(entry.getTimestamp()).isEqualTo(TIMESTAMP);
+        assertThat(entry.getSubject()).isEmpty();
+    }
+
+    @Test
     public void testProcessAuthNoLogTimeStrategy()
     {
         // Given
@@ -417,6 +673,71 @@ public class TestAuditAdapter
         SimpleAuditOperation operation = AuditAdapter.statusToAuthenticationOperation(mockStatus);
         // Then
         assertThat(operation.getOperationString()).isEqualTo("Authentication OK");
+    }
+
+    @Test
+    public void testProcessAuthExceptionKeepsCause()
+    {
+        // Given
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(ConnectionResource.root());
+        when(mockAuditEntryBuilderFactory.createAuthenticationEntryBuilder()).thenReturn(entryBuilder);
+
+        ReadTimeoutException expectedCause = new ReadTimeoutException(ConsistencyLevel.QUORUM, 3, 4, true);
+        doThrow(expectedCause).when(mockAuditor).audit(any(AuditEntry.class));
+
+        // When / Then
+        assertThatExceptionOfType(AuthenticationException.class)
+        .isThrownBy(() -> auditAdapter.auditAuth(USER, clientAddress, "bob-the-subject", Status.SUCCEEDED, TIMESTAMP))
+        .withMessage(expectedCause.toString())
+        .satisfies(e -> assertThat(e.getCause()).isSameAs(expectedCause));
+    }
+
+    @Test
+    public void testProcessAuthUnexpectedExceptionIsNotWrapped()
+    {
+        // Given
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(ConnectionResource.root());
+        when(mockAuditEntryBuilderFactory.createAuthenticationEntryBuilder()).thenReturn(entryBuilder);
+
+        IllegalStateException expectedException = new IllegalStateException("logger failure");
+        doThrow(expectedException).when(mockAuditor).audit(any(AuditEntry.class));
+
+        // When / Then
+        assertThatExceptionOfType(IllegalStateException.class)
+        .isThrownBy(() -> auditAdapter.auditAuth(USER, clientAddress, Status.ATTEMPT, TIMESTAMP))
+        .satisfies(e -> assertThat(e).isSameAs(expectedException));
+    }
+
+    @Test
+    public void testStatusToAuthenticationOperationForAllStatuses()
+    {
+        assertThat(AuditAdapter.statusToAuthenticationOperation(Status.ATTEMPT).getOperationString()).isEqualTo("Authentication attempt");
+        assertThat(AuditAdapter.statusToAuthenticationOperation(Status.FAILED).getOperationString()).isEqualTo("Authentication failed");
+        assertThat(AuditAdapter.statusToAuthenticationOperation(Status.SUCCEEDED).getOperationString()).isEqualTo("Authentication succeeded");
+    }
+
+    @Test
+    public void testGetAuditor()
+    {
+        assertThat(auditAdapter.getAuditor()).isSameAs(mockAuditor);
+    }
+
+    @Test
+    public void testGetInstanceReturnsSameInstance()
+    {
+        assertThat(AuditAdapter.getInstance()).isSameAs(AuditAdapter.getInstance());
+    }
+
+    @Test
+    public void testBoundValueSuppressorAccessors()
+    {
+        // Given
+        BoundValueSuppressor suppressor = mock(BoundValueSuppressor.class);
+        assertThat(auditAdapter.getBoundValueSuppressor()).isSameAs(mockBoundValueSuppressor);
+        // When
+        auditAdapter.setBoundValueSuppressor(suppressor);
+        // Then
+        assertThat(auditAdapter.getBoundValueSuppressor()).isSameAs(suppressor);
     }
 
     private ImmutableList<ColumnSpecification> createTextColumns(String... columns)
