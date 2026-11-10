@@ -16,20 +16,30 @@
 package com.ericsson.bss.cassandra.ecaudit.eclog;
 
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+import java.util.Optional;
 import java.util.UUID;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 
 import com.ericsson.bss.cassandra.ecaudit.common.chronicle.AuditRecordReadMarshallable;
+import com.ericsson.bss.cassandra.ecaudit.common.chronicle.AuditRecordWriteMarshallable;
 import com.ericsson.bss.cassandra.ecaudit.common.chronicle.FieldSelector.Field;
+import com.ericsson.bss.cassandra.ecaudit.common.record.AuditOperation;
+import com.ericsson.bss.cassandra.ecaudit.common.record.AuditRecord;
+import com.ericsson.bss.cassandra.ecaudit.common.record.Status;
 import com.ericsson.bss.cassandra.ecaudit.common.record.StoredAuditRecord;
 import com.ericsson.bss.cassandra.ecaudit.test.chronicle.RecordValues;
 import net.openhft.chronicle.core.io.IORuntimeException;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.RollCycles;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.wire.ReadMarshallable;
 import net.openhft.chronicle.wire.ValueIn;
 import net.openhft.chronicle.wire.WireIn;
@@ -41,14 +51,22 @@ import static com.ericsson.bss.cassandra.ecaudit.common.chronicle.FieldSelector.
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.StrictStubs.class)
 public class TestQueueReader
 {
+    private static final long WRITE_TIME_MS = 1_000_000_000_000L;
+
+    @Rule
+    public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
     @Mock
     private ChronicleQueue queue;
 
@@ -140,7 +158,138 @@ public class TestQueueReader
         .withMessageContaining("Corrupt");
     }
 
+    @Test
+    public void testNoTailStartsAtBeginning()
+    {
+        givenReader();
+
+        verify(tailer, never()).toEnd();
+        verify(tailer, never()).moveToIndex(anyLong());
+    }
+
+    @Test
+    public void testTailLargerThanQueueStartsAtFirstIndex()
+    {
+        givenReader(ToolOptions.builder().withTail(5000).build());
+
+        verify(tailer).moveToIndex(eq(0L));
+    }
+
+    @Test
+    public void testTailOfZeroStartsAtEnd()
+    {
+        givenReader(ToolOptions.builder().withTail(0).build());
+
+        verify(tailer).moveToIndex(eq(1000L));
+    }
+
+    @Test
+    public void testAvailableRecordIsReadOnlyOnce() throws UnknownHostException
+    {
+        givenNextRecordIs(defaultValues);
+        QueueReader reader = givenReader();
+
+        assertThat(reader.hasRecordAvailable()).isTrue();
+        assertThat(reader.hasRecordAvailable()).isTrue();
+        verify(tailer, times(1)).readDocument(any(ReadMarshallable.class));
+        assertRecordMatchesWire(reader.nextRecord(), defaultValues);
+    }
+
+    @Test
+    public void testRecordIsConsumedWhenReturned() throws UnknownHostException
+    {
+        Answer<Boolean> recordAnswer = givenAnswerWithRecord(defaultValues);
+        when(tailer.readDocument(any(ReadMarshallable.class)))
+        .thenAnswer(recordAnswer)
+        .thenReturn(false);
+        QueueReader reader = givenReader();
+
+        assertRecordMatchesWire(reader.nextRecord(), defaultValues);
+        assertThat(reader.hasRecordAvailable()).isFalse();
+        assertThat(reader.nextRecord()).isNull();
+    }
+
+    @Test
+    public void testRecordAvailableAfterEmptyRead() throws UnknownHostException
+    {
+        Answer<Boolean> recordAnswer = givenAnswerWithRecord(defaultValues);
+        when(tailer.readDocument(any(ReadMarshallable.class)))
+        .thenReturn(false)
+        .thenAnswer(recordAnswer);
+        QueueReader reader = givenReader();
+
+        assertThat(reader.hasRecordAvailable()).isFalse();
+        assertThat(reader.hasRecordAvailable()).isTrue();
+        assertRecordMatchesWire(reader.nextRecord(), defaultValues);
+    }
+
+    @Test
+    public void testReadAllRecordsFromQueueDirectory() throws UnknownHostException
+    {
+        givenRecordsInQueueDirectory(RollCycles.TEST_SECONDLY, 3);
+        QueueReader reader = new QueueReader(givenOptionsForQueueDirectory().withRollCycle(RollCycles.TEST_SECONDLY).build());
+
+        assertThatNextOperationsAre(reader, "operation 0", "operation 1", "operation 2");
+    }
+
+    @Test
+    public void testReadFromQueueDirectoryWithDefaultRollCycle() throws UnknownHostException
+    {
+        givenRecordsInQueueDirectory(RollCycles.DEFAULT, 2);
+        QueueReader reader = new QueueReader(givenOptionsForQueueDirectory().build());
+
+        assertThatNextOperationsAre(reader, "operation 0", "operation 1");
+    }
+
+    @Test
+    public void testReadFromEmptyQueueDirectory()
+    {
+        QueueReader reader = new QueueReader(givenOptionsForQueueDirectory().build());
+
+        assertThat(reader.hasRecordAvailable()).isFalse();
+        assertThat(reader.nextRecord()).isNull();
+    }
+
+    @Test
+    public void testTailFromQueueDirectory() throws UnknownHostException
+    {
+        givenRecordsInQueueDirectory(RollCycles.TEST_SECONDLY, 5);
+        QueueReader reader = new QueueReader(givenOptionsForQueueDirectory().withRollCycle(RollCycles.TEST_SECONDLY).withTail(2).build());
+
+        assertThatNextOperationsAre(reader, "operation 3", "operation 4");
+    }
+
+    @Test
+    public void testTailLargerThanQueueDirectory() throws UnknownHostException
+    {
+        givenRecordsInQueueDirectory(RollCycles.TEST_SECONDLY, 2);
+        QueueReader reader = new QueueReader(givenOptionsForQueueDirectory().withRollCycle(RollCycles.TEST_SECONDLY).withTail(10).build());
+
+        assertThatNextOperationsAre(reader, "operation 0", "operation 1");
+    }
+
+    @Test
+    public void testReadRecordAppendedAfterReaderIsCreated() throws UnknownHostException
+    {
+        try (ChronicleQueue writeQueue = givenWriteQueue(RollCycles.TEST_SECONDLY))
+        {
+            givenRecordIsAppended(writeQueue, "operation 0");
+            QueueReader reader = new QueueReader(givenOptionsForQueueDirectory().withRollCycle(RollCycles.TEST_SECONDLY).build());
+            assertThatNextOperationsAre(reader, "operation 0");
+
+            givenRecordIsAppended(writeQueue, "operation 1");
+
+            assertThatNextOperationsAre(reader, "operation 1");
+        }
+    }
+
     private void givenNextRecordIs(RecordValues recordValues)
+    {
+        Answer<Boolean> recordAnswer = givenAnswerWithRecord(recordValues);
+        when(tailer.readDocument(any(ReadMarshallable.class))).thenAnswer(recordAnswer);
+    }
+
+    private Answer<Boolean> givenAnswerWithRecord(RecordValues recordValues)
     {
         WireIn wireMock = mock(WireIn.class);
 
@@ -192,13 +341,11 @@ public class TestQueueReader
         when(operationValueMock.text()).thenReturn(recordValues.getOperation());
         when(wireMock.read(eq("operation"))).thenReturn(operationValueMock);
 
-        when(tailer.readDocument(any(ReadMarshallable.class)))
-        .thenAnswer((Answer<Boolean>) invocation -> {
-                        AuditRecordReadMarshallable readMarshallable = invocation.getArgument(0);
-                        readMarshallable.readMarshallable(wireMock);
-                        return true;
-                    }
-        );
+        return invocation -> {
+            AuditRecordReadMarshallable readMarshallable = invocation.getArgument(0);
+            readMarshallable.readMarshallable(wireMock);
+            return true;
+        };
     }
 
     private QueueReader givenReader()
@@ -209,6 +356,60 @@ public class TestQueueReader
     private QueueReader givenReader(ToolOptions toolOptions)
     {
         return new QueueReader(toolOptions, queue);
+    }
+
+    private ToolOptions.Builder givenOptionsForQueueDirectory()
+    {
+        return ToolOptions.builder().withPath(temporaryFolder.getRoot().toPath());
+    }
+
+    private ChronicleQueue givenWriteQueue(RollCycles rollCycle)
+    {
+        // Fixed time keeps all records in one roll cycle
+        return SingleChronicleQueueBuilder.single(temporaryFolder.getRoot())
+                                          .rollCycle(rollCycle)
+                                          .timeProvider(() -> WRITE_TIME_MS)
+                                          .blockSize(1024)
+                                          .build();
+    }
+
+    private void givenRecordsInQueueDirectory(RollCycles rollCycle, int count) throws UnknownHostException
+    {
+        try (ChronicleQueue writeQueue = givenWriteQueue(rollCycle))
+        {
+            for (int i = 0; i < count; i++)
+            {
+                givenRecordIsAppended(writeQueue, "operation " + i);
+            }
+        }
+    }
+
+    private void givenRecordIsAppended(ChronicleQueue writeQueue, String operation) throws UnknownHostException
+    {
+        AuditOperation auditOperation = mock(AuditOperation.class);
+        when(auditOperation.getOperationString()).thenReturn(operation);
+
+        AuditRecord auditRecord = mock(AuditRecord.class);
+        when(auditRecord.getTimestamp()).thenReturn(defaultValues.getTimestamp());
+        when(auditRecord.getClientAddress()).thenReturn(new InetSocketAddress(InetAddress.getByAddress(defaultValues.getClientAddress()), defaultValues.getClientPort()));
+        when(auditRecord.getCoordinatorAddress()).thenReturn(InetAddress.getByAddress(defaultValues.getCoordinatorAddress()));
+        when(auditRecord.getUser()).thenReturn(defaultValues.gethUser());
+        when(auditRecord.getBatchId()).thenReturn(Optional.empty());
+        when(auditRecord.getStatus()).thenReturn(Status.valueOf(defaultValues.getStatus()));
+        when(auditRecord.getOperation()).thenReturn(auditOperation);
+        when(auditRecord.getSubject()).thenReturn(Optional.empty());
+
+        writeQueue.acquireAppender().writeDocument(new AuditRecordWriteMarshallable(auditRecord, DEFAULT_FIELDS));
+    }
+
+    private void assertThatNextOperationsAre(QueueReader reader, String... expectedOperations)
+    {
+        for (String expectedOperation : expectedOperations)
+        {
+            assertThat(reader.hasRecordAvailable()).isTrue();
+            assertThat(reader.nextRecord().getOperation()).contains(expectedOperation);
+        }
+        assertThat(reader.hasRecordAvailable()).isFalse();
     }
 
     private void assertRecordMatchesWire(StoredAuditRecord actualAuditRecord, RecordValues expectedValues) throws UnknownHostException
