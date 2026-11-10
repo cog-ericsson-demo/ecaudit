@@ -2,6 +2,8 @@
 
 ## Version 3.1.5 (only flavor ecaudit_c5.0)
 
+* Obfuscate passwords containing whitespace, escaped quotes or using $$ quoting in role statements
+
 ## Version 3.1.4
 
 * Fix build error with Cassandra 5.0.6 (only flavor ecaudit_c5.0) - #401

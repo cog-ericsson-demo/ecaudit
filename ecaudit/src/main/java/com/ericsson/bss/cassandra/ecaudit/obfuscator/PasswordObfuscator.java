@@ -35,12 +35,31 @@ import com.google.common.collect.Sets;
 public class PasswordObfuscator implements AuditObfuscator
 {
     private static final String PASSWORD_OBFUSCATED = "*****";
+    private static final String QUOTED_PASSWORD_OBFUSCATED = "'" + PASSWORD_OBFUSCATED + "'";
+    private static final String DOLLAR_QUOTED_PASSWORD_OBFUSCATED = "$$" + PASSWORD_OBFUSCATED + "$$";
 
-    private static final int PATTERN_FLAGS = Pattern.CASE_INSENSITIVE | Pattern.DOTALL;
+    private static final String PASSWORD_KEYWORD = "password";
 
-    private static final String REGEX_PASSWORD_GROUP = "password";
-    private static final Pattern PASSWORD_PATTERN =
-            Pattern.compile(".*password\\s*=?\\s*'(?<password>[^\\s]+)'.*", PATTERN_FLAGS);
+    private static final String GROUP_STRING = "string";
+    private static final String GROUP_DOLLAR = "dollar";
+    private static final String GROUP_IGNORABLE = "ignorable";
+    private static final String GROUP_WORD = "word";
+    private static final String GROUP_EQUALS = "equals";
+
+    /**
+     * Splits a CQL statement into tokens. String literals, dollar quoted literals, quoted identifiers
+     * and comments are consumed as whole tokens so that their content is never mistaken for a keyword.
+     * Unterminated literals extend to the end of the statement.
+     */
+    private static final Pattern TOKEN_PATTERN = Pattern.compile(
+            namedGroup(GROUP_STRING, "'(?:[^']++|'')*+(?:'|\\z)")
+            + '|' + namedGroup(GROUP_DOLLAR, "\\$\\$.*?(?:\\$\\$|\\z)")
+            + '|' + namedGroup(GROUP_IGNORABLE, "\\s++|--[^\\n]*+|//[^\\n]*+|/\\*.*?(?:\\*/|\\z)")
+            + '|' + namedGroup(GROUP_WORD, "\\w++")
+            + '|' + namedGroup(GROUP_EQUALS, "=")
+            + "|\"(?:[^\"]++|\"\")*+(?:\"|\\z)"
+            + "|.",
+            Pattern.DOTALL);
 
     private static final Set<Permission> PASSWORD_PERMISSIONS = ImmutableSet.of(Permission.CREATE, Permission.ALTER);
 
@@ -82,30 +101,58 @@ public class PasswordObfuscator implements AuditObfuscator
     }
 
     /**
-     * Obfuscate password in the given query, if present
-     * @param operation the query to obfuscate password in
-     * @return a query with an obfuscated password if present
+     * Obfuscate every password literal in the given query, if present.
+     * A password literal is a string literal or dollar quoted literal following the PASSWORD keyword,
+     * optionally separated by an equals sign. This covers both PASSWORD and HASHED PASSWORD options.
+     *
+     * @param operation the query to obfuscate passwords in
+     * @return a query with obfuscated passwords if present
      */
     private String obfuscateOperation(String operation)
     {
-        Matcher passwordMatcher = PASSWORD_PATTERN.matcher(operation);
-        if (passwordMatcher.matches())
+        StringBuilder obfuscated = new StringBuilder(operation.length());
+        Matcher tokenMatcher = TOKEN_PATTERN.matcher(operation);
+        boolean passwordExpected = false;
+        boolean modified = false;
+
+        while (tokenMatcher.find())
         {
-            return obfuscateOperation(passwordMatcher, operation);
+            String token = tokenMatcher.group();
+            if (passwordExpected && tokenMatcher.group(GROUP_STRING) != null)
+            {
+                obfuscated.append(QUOTED_PASSWORD_OBFUSCATED);
+                modified = true;
+                passwordExpected = false;
+            }
+            else if (passwordExpected && tokenMatcher.group(GROUP_DOLLAR) != null)
+            {
+                obfuscated.append(DOLLAR_QUOTED_PASSWORD_OBFUSCATED);
+                modified = true;
+                passwordExpected = false;
+            }
+            else
+            {
+                obfuscated.append(token);
+                passwordExpected = isPasswordPrefix(tokenMatcher, passwordExpected);
+            }
         }
 
-        return operation;
+        return modified ? obfuscated.toString() : operation;
     }
 
-    private String obfuscateOperation(Matcher matcher, String operation)
+    private static String namedGroup(String name, String regex)
     {
-        StringBuilder obfuscated = new StringBuilder();
-        int matchStart = matcher.start(REGEX_PASSWORD_GROUP);
-        int matchStop = matcher.end(REGEX_PASSWORD_GROUP);
-
-        obfuscated.append(operation, 0, matchStart).append(PASSWORD_OBFUSCATED).append(operation.substring(matchStop));
-
-        return obfuscated.toString();
+        return "(?<" + name + ">" + regex + ")";
     }
 
+    private static boolean isPasswordPrefix(Matcher tokenMatcher, boolean passwordExpected)
+    {
+        if (tokenMatcher.group(GROUP_WORD) != null)
+        {
+            return PASSWORD_KEYWORD.equalsIgnoreCase(tokenMatcher.group());
+        }
+
+        boolean separator = tokenMatcher.group(GROUP_IGNORABLE) != null || tokenMatcher.group(GROUP_EQUALS) != null;
+        return passwordExpected && separator;
+    }
 }
