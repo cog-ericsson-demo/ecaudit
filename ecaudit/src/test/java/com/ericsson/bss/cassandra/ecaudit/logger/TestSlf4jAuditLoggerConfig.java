@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -103,5 +104,164 @@ public class TestSlf4jAuditLoggerConfig
         .withCauseInstanceOf(DateTimeException.class)
         .withMessageContaining("Invalid SLF4J logger time zone parameter")
         .withMessageContaining("DoesNotExist");
+    }
+
+    @Test
+    public void testGetLogFormatWithFormatConfigured()
+    {
+        Map<String, String> options = ImmutableMap.of("log_format", "${TIMESTAMP}|${USER}|${OPERATION}");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getLogFormat()).isEqualTo("${TIMESTAMP}|${USER}|${OPERATION}");
+    }
+
+    @Test
+    public void testGetLogFormatWithNullValueGetDefault()
+    {
+        Map<String, String> options = new HashMap<>();
+        options.put("log_format", null);
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getLogFormat()).isEqualTo("client:'${CLIENT_IP}'|user:'${USER}'{?|batchId:'${BATCH_ID}'?}|status:'${STATUS}'|operation:'${OPERATION}'");
+    }
+
+    @Test
+    public void testUnknownParametersAreIgnored()
+    {
+        Map<String, String> options = ImmutableMap.of("unknown_parameter", "value");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getLogFormat()).isEqualTo("client:'${CLIENT_IP}'|user:'${USER}'{?|batchId:'${BATCH_ID}'?}|status:'${STATUS}'|operation:'${OPERATION}'");
+        assertThat(auditConfig.getTimeFormatter()).isEmpty();
+        assertThat(auditConfig.getEscapeCharacters()).isEmpty();
+    }
+
+    @Test
+    public void testGetTimeFormatterWithOffsetZoneConfigured()
+    {
+        Map<String, String> options = ImmutableMap.of("time_format", "yyyy-MM-dd HH:mm:ss.SSSZ",
+                                                      "time_zone", "+02:00");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        Optional<DateTimeFormatter> timeFormatter = auditConfig.getTimeFormatter();
+        assertThat(timeFormatter).map(f -> f.format(Instant.EPOCH.plusMillis(42))).contains("1970-01-01 02:00:00.042+0200");
+        assertThat(timeFormatter).map(DateTimeFormatter::getZone).contains(ZoneId.of("+02:00"));
+    }
+
+    @Test
+    public void testGetTimeFormatterThrowsExceptionWhenMalformedTimeZone()
+    {
+        Map<String, String> options = ImmutableMap.of("time_format", "yyyy-MM-dd HH:mm:ss.SSSZ",
+                                                      "time_zone", "Not A Zone");
+
+        assertThatExceptionOfType(ConfigurationException.class)
+        .isThrownBy(() -> new Slf4jAuditLoggerConfig(options))
+        .withCauseInstanceOf(DateTimeException.class)
+        .withMessageContaining("Invalid SLF4J logger time zone parameter")
+        .withMessageContaining("Not A Zone");
+    }
+
+    @Test
+    public void testGetTimeFormatterWithoutFormatConfiguredIgnoresTimeZone()
+    {
+        Map<String, String> options = ImmutableMap.of("time_zone", "DoesNotExist");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getTimeFormatter()).isEmpty();
+    }
+
+    @Test
+    public void testGetEscapeCharactersWithoutEscapeConfiguredIsEmpty()
+    {
+        Map<String, String> options = Collections.emptyMap();
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).isEmpty();
+    }
+
+    @Test
+    public void testGetEscapeCharactersWithEmptyValueIsEmpty()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", "");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).isEmpty();
+    }
+
+    @Test
+    public void testGetEscapeCharactersWithSingleCharacter()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", "|");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).containsExactly("|");
+    }
+
+    @Test
+    public void testGetEscapeCharactersWithCommaSeparatedList()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", "\",',|");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).containsExactlyInAnyOrder("\"", "'", "|");
+    }
+
+    @Test
+    public void testGetEscapeCharactersTrimsWhitespace()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", " \" ,\t' , | ");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).containsExactlyInAnyOrder("\"", "'", "|");
+    }
+
+    @Test
+    public void testGetEscapeCharactersSkipsEmptyEntries()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", ",\",, ,|,");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).containsExactlyInAnyOrder("\"", "|");
+    }
+
+    @Test
+    public void testGetEscapeCharactersWithOnlySeparatorsIsEmpty()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", " , ,");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).isEmpty();
+    }
+
+    @Test
+    public void testGetEscapeCharactersRemovesDuplicates()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", "|,\", |,\"");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).containsExactlyInAnyOrder("\"", "|");
+    }
+
+    @Test
+    public void testGetEscapeCharactersKeepsMultiCharacterEntries()
+    {
+        Map<String, String> options = ImmutableMap.of("escape_characters", "ab,|");
+
+        Slf4jAuditLoggerConfig auditConfig = new Slf4jAuditLoggerConfig(options);
+
+        assertThat(auditConfig.getEscapeCharacters()).containsExactlyInAnyOrder("ab", "|");
     }
 }
