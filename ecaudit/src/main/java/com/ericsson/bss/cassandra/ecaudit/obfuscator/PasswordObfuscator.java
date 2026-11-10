@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.auth.RoleResource;
+import org.apache.cassandra.cql3.QueryProcessor;
 
 import com.ericsson.bss.cassandra.ecaudit.entry.AuditEntry;
 import com.ericsson.bss.cassandra.ecaudit.common.record.SimpleAuditOperation;
@@ -35,12 +36,46 @@ import com.google.common.collect.Sets;
 public class PasswordObfuscator implements AuditObfuscator
 {
     private static final String PASSWORD_OBFUSCATED = "*****";
+    private static final String QUOTED_PASSWORD_OBFUSCATED = "'" + PASSWORD_OBFUSCATED + "'";
+    private static final String DOLLAR_QUOTED_PASSWORD_OBFUSCATED = "$$" + PASSWORD_OBFUSCATED + "$$";
 
-    private static final int PATTERN_FLAGS = Pattern.CASE_INSENSITIVE | Pattern.DOTALL;
+    private static final String PASSWORD_KEYWORD = "password";
 
-    private static final String REGEX_PASSWORD_GROUP = "password";
-    private static final Pattern PASSWORD_PATTERN =
-            Pattern.compile(".*password\\s*=?\\s*'(?<password>[^\\s]+)'.*", PATTERN_FLAGS);
+    private static final String GROUP_STRING = "string";
+    private static final String GROUP_DOLLAR = "dollar";
+    private static final String GROUP_IGNORABLE = "ignorable";
+    private static final String GROUP_WORD = "word";
+    private static final String GROUP_EQUALS = "equals";
+
+    private static final String STRING_LITERAL_REGEX = "'(?:[^']++|'')*+(?:'|\\z)";
+    private static final String DOLLAR_LITERAL_REGEX = "\\$\\$.*?(?:\\$\\$|\\z)";
+
+    /**
+     * Splits a CQL statement into tokens. String literals, dollar quoted literals, quoted identifiers
+     * and comments are consumed as whole tokens so that their content is never mistaken for a keyword.
+     * Unterminated literals extend to the end of the statement.
+     */
+    private static final Pattern TOKEN_PATTERN = Pattern.compile(
+            namedGroup(GROUP_STRING, STRING_LITERAL_REGEX)
+            + '|' + namedGroup(GROUP_DOLLAR, DOLLAR_LITERAL_REGEX)
+            + '|' + namedGroup(GROUP_IGNORABLE, "\\s++|--[^\\n]*+|//[^\\n]*+|/\\*.*?(?:\\*/|\\z)")
+            + '|' + namedGroup(GROUP_WORD, "\\w++")
+            + '|' + namedGroup(GROUP_EQUALS, "=")
+            + "|\"(?:[^\"]++|\"\")*+(?:\"|\\z)"
+            + "|.",
+            Pattern.DOTALL);
+
+    /**
+     * Matches the PASSWORD keyword anywhere in a statement, including inside literals and identifiers,
+     * when it is directly followed by a literal. Used as a fallback for statements that Cassandra cannot parse,
+     * where misplaced quotes may make the tokenized view differ from what the author intended.
+     */
+    private static final Pattern RAW_PASSWORD_PATTERN =
+            Pattern.compile("\\bpassword\\s*+=?\\s*+(?='|\\$\\$)", Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern LITERAL_PATTERN = Pattern.compile(
+            namedGroup(GROUP_STRING, STRING_LITERAL_REGEX) + '|' + namedGroup(GROUP_DOLLAR, DOLLAR_LITERAL_REGEX),
+            Pattern.DOTALL);
 
     private static final Set<Permission> PASSWORD_PERMISSIONS = ImmutableSet.of(Permission.CREATE, Permission.ALTER);
 
@@ -51,7 +86,8 @@ public class PasswordObfuscator implements AuditObfuscator
         {
             AuditEntry obfuscatedEntry = entry;
 
-            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString());
+            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString(),
+                                                            entry.hasKnownOperation());
             if (!entry.getOperation().getOperationString().equals(obfuscatedOperation))
             {
                 obfuscatedEntry = AuditEntry.newBuilder()
@@ -82,30 +118,117 @@ public class PasswordObfuscator implements AuditObfuscator
     }
 
     /**
-     * Obfuscate password in the given query, if present
-     * @param operation the query to obfuscate password in
-     * @return a query with an obfuscated password if present
+     * Obfuscate every password literal in the given query, if present.
+     * A password literal is a string literal or dollar quoted literal following the PASSWORD keyword,
+     * optionally separated by an equals sign. This covers both PASSWORD and HASHED PASSWORD options.
+     *
+     * <p>
+     * Statements that Cassandra cannot parse may contain misplaced quotes. For those, every literal following
+     * a PASSWORD keyword is also obfuscated regardless of quoting, possibly obfuscating more than the password.
+     * Such statements are never executed, so this cannot hide an executed statement from the audit log.
+     *
+     * @param operation the query to obfuscate passwords in
+     * @param knownOperation true if the query was successfully parsed and mapped
+     * @return a query with obfuscated passwords if present
      */
-    private String obfuscateOperation(String operation)
+    private String obfuscateOperation(String operation, boolean knownOperation)
     {
-        Matcher passwordMatcher = PASSWORD_PATTERN.matcher(operation);
-        if (passwordMatcher.matches())
+        String obfuscated = obfuscateTokenizedOperation(operation);
+        return knownOperation || isParsable(operation) ? obfuscated : obfuscateRawOperation(obfuscated);
+    }
+
+    private static boolean isParsable(String operation)
+    {
+        try
         {
-            return obfuscateOperation(passwordMatcher, operation);
+            QueryProcessor.parseStatement(operation);
+            return true;
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+    }
+
+    private static String obfuscateTokenizedOperation(String operation)
+    {
+        StringBuilder obfuscated = new StringBuilder(operation.length());
+        Matcher tokenMatcher = TOKEN_PATTERN.matcher(operation);
+        boolean passwordExpected = false;
+        boolean modified = false;
+
+        while (tokenMatcher.find())
+        {
+            String token = tokenMatcher.group();
+            if (passwordExpected && tokenMatcher.group(GROUP_STRING) != null)
+            {
+                obfuscated.append(QUOTED_PASSWORD_OBFUSCATED);
+                modified = true;
+                passwordExpected = false;
+            }
+            else if (passwordExpected && tokenMatcher.group(GROUP_DOLLAR) != null)
+            {
+                obfuscated.append(DOLLAR_QUOTED_PASSWORD_OBFUSCATED);
+                modified = true;
+                passwordExpected = false;
+            }
+            else
+            {
+                obfuscated.append(token);
+                passwordExpected = isPasswordPrefix(tokenMatcher, passwordExpected);
+            }
         }
 
-        return operation;
+        return modified ? obfuscated.toString() : operation;
     }
 
-    private String obfuscateOperation(Matcher matcher, String operation)
+    private static String obfuscateRawOperation(String operation)
     {
-        StringBuilder obfuscated = new StringBuilder();
-        int matchStart = matcher.start(REGEX_PASSWORD_GROUP);
-        int matchStop = matcher.end(REGEX_PASSWORD_GROUP);
+        StringBuilder obfuscated = new StringBuilder(operation.length());
+        Matcher keywordMatcher = RAW_PASSWORD_PATTERN.matcher(operation);
+        Matcher literalMatcher = LITERAL_PATTERN.matcher(operation);
+        int copied = 0;
 
-        obfuscated.append(operation, 0, matchStart).append(PASSWORD_OBFUSCATED).append(operation.substring(matchStop));
+        while (keywordMatcher.find())
+        {
+            int literalStart = keywordMatcher.end();
+            literalMatcher.region(literalStart, operation.length());
+            if (!literalMatcher.lookingAt())
+            {
+                continue;
+            }
 
-        return obfuscated.toString();
+            if (literalStart >= copied)
+            {
+                obfuscated.append(operation, copied, literalStart)
+                          .append(literalMatcher.group(GROUP_DOLLAR) == null
+                                  ? QUOTED_PASSWORD_OBFUSCATED
+                                  : DOLLAR_QUOTED_PASSWORD_OBFUSCATED);
+            }
+            copied = Math.max(copied, literalMatcher.end());
+        }
+
+        if (copied == 0)
+        {
+            return operation;
+        }
+
+        return obfuscated.append(operation.substring(copied)).toString();
     }
 
+    private static String namedGroup(String name, String regex)
+    {
+        return "(?<" + name + ">" + regex + ")";
+    }
+
+    private static boolean isPasswordPrefix(Matcher tokenMatcher, boolean passwordExpected)
+    {
+        if (tokenMatcher.group(GROUP_WORD) != null)
+        {
+            return PASSWORD_KEYWORD.equalsIgnoreCase(tokenMatcher.group());
+        }
+
+        boolean separator = tokenMatcher.group(GROUP_IGNORABLE) != null || tokenMatcher.group(GROUP_EQUALS) != null;
+        return passwordExpected && separator;
+    }
 }

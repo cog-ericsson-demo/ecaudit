@@ -144,6 +144,116 @@ public class TestPasswordObfuscator
         validateUnknownQueries(alterUserQueries);
     }
 
+    @Test
+    public void testPasswordWithWhitespaceObfuscation()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("ALTER ROLE app_admin WITH PASSWORD = 'correct horse battery staple';",
+                    "ALTER ROLE app_admin WITH PASSWORD = '*****';");
+        queries.put("CREATE ROLE app_admin WITH PASSWORD = 'tab\there' AND LOGIN = true;",
+                    "CREATE ROLE app_admin WITH PASSWORD = '*****' AND LOGIN = true;");
+        queries.put("ALTER USER app_admin WITH PASSWORD 'new\nline';",
+                    "ALTER USER app_admin WITH PASSWORD '*****';");
+
+        validateQueries(queries, "app_admin", Permission.ALTER);
+        validateQueries(queries, "app_admin", Permission.CREATE);
+    }
+
+    @Test
+    public void testPasswordWithEscapedQuoteObfuscation()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("ALTER ROLE app_admin WITH PASSWORD = 'it''s me' AND LOGIN = true;",
+                    "ALTER ROLE app_admin WITH PASSWORD = '*****' AND LOGIN = true;");
+        queries.put("ALTER ROLE app_admin WITH PASSWORD = 'x'' AND LOGIN = true AND SUPERUSER = ''true';",
+                    "ALTER ROLE app_admin WITH PASSWORD = '*****';");
+
+        validateQueries(queries, "app_admin", Permission.ALTER);
+    }
+
+    @Test
+    public void testDollarQuotedPasswordObfuscation()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("ALTER ROLE app_admin WITH PASSWORD = $$secret value$$;",
+                    "ALTER ROLE app_admin WITH PASSWORD = $$*****$$;");
+        queries.put("CREATE ROLE app_admin WITH PASSWORD = $$it's 'quoted'$$ AND LOGIN = true;",
+                    "CREATE ROLE app_admin WITH PASSWORD = $$*****$$ AND LOGIN = true;");
+        queries.put("CREATE USER app_admin WITH PASSWORD $$secret$$ SUPERUSER;",
+                    "CREATE USER app_admin WITH PASSWORD $$*****$$ SUPERUSER;");
+
+        validateQueries(queries, "app_admin", Permission.CREATE);
+    }
+
+    @Test
+    public void testHashedPasswordObfuscation()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("CREATE ROLE app_admin WITH HASHED PASSWORD = '$2a$10$abc def' AND LOGIN = true;",
+                    "CREATE ROLE app_admin WITH HASHED PASSWORD = '*****' AND LOGIN = true;");
+
+        validateQueries(queries, "app_admin", Permission.CREATE);
+    }
+
+    @Test
+    public void testPasswordKeywordInsideRoleNameDoesNotHidePassword()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("CREATE ROLE 'my password ' WITH PASSWORD = 'secret value' AND LOGIN = true;",
+                    "CREATE ROLE 'my password ' WITH PASSWORD = '*****' AND LOGIN = true;");
+        queries.put("CREATE ROLE \"password\" WITH PASSWORD = 'secret value';",
+                    "CREATE ROLE \"password\" WITH PASSWORD = '*****';");
+
+        validateQueries(queries, "app_admin", Permission.CREATE);
+    }
+
+    @Test
+    public void testUnterminatedPasswordObfuscation()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("ALTER ROLE app_admin WITH PASSWORD = 'secret value", "ALTER ROLE app_admin WITH PASSWORD = '*****'");
+        queries.put("ALTER ROLE app_admin WITH PASSWORD = $$secret value", "ALTER ROLE app_admin WITH PASSWORD = $$*****$$");
+
+        validateUnknownQueries(queries);
+    }
+
+    @Test
+    public void testUnparsedStatementWithUnbalancedQuotesObfuscation()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("CREATE ROLE 'bob WITH PASSWORD = 'secret value' AND LOGIN = true",
+                    "CREATE ROLE 'bob WITH PASSWORD = '*****' AND LOGIN = true");
+        queries.put("ALTER ROLE \"bob WITH PASSWORD = $$secret value$$;",
+                    "ALTER ROLE \"bob WITH PASSWORD = $$*****$$;");
+        queries.put("CREATE ROLE 'x password ' WITH PASSWORD = 'secret value",
+                    "CREATE ROLE 'x password '*****'");
+        queries.put("CREATE ROLE 'bob WITH PASSWORD = ' secret value 'x'",
+                    "CREATE ROLE 'bob WITH PASSWORD = '*****'x'");
+
+        validateUnknownQueries(queries);
+    }
+
+    @Test
+    public void testNoRawObfuscationOfParsableUnknownStatement()
+    {
+        List<String> queries = Arrays.asList(
+        "SELECT * FROM ks.tbl /* password ' */ WHERE id = 'x'",
+        "SELECT * FROM ks.tbl WHERE comment = 'password ' AND id = 'x'");
+
+        for (String query : queries)
+        {
+            AuditEntry entry = AuditEntry.newBuilder()
+                                         .operation(new SimpleAuditOperation(query))
+                                         .permissions(Permission.ALL)
+                                         .resource(DataResource.root())
+                                         .knownOperation(false)
+                                         .build();
+
+            AuditEntry obfuscated = myObfuscator.obfuscate(entry);
+            assertThat(obfuscated.getOperation().getOperationString()).isEqualTo(query);
+        }
+    }
+
     private void validateUnmodifiedQueries(List<String> queries, String username, Permission permission)
     {
         for (String query : queries)
