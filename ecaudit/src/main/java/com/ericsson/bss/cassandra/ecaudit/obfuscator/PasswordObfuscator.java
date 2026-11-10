@@ -46,19 +46,34 @@ public class PasswordObfuscator implements AuditObfuscator
     private static final String GROUP_WORD = "word";
     private static final String GROUP_EQUALS = "equals";
 
+    private static final String STRING_LITERAL_REGEX = "'(?:[^']++|'')*+(?:'|\\z)";
+    private static final String DOLLAR_LITERAL_REGEX = "\\$\\$.*?(?:\\$\\$|\\z)";
+
     /**
      * Splits a CQL statement into tokens. String literals, dollar quoted literals, quoted identifiers
      * and comments are consumed as whole tokens so that their content is never mistaken for a keyword.
      * Unterminated literals extend to the end of the statement.
      */
     private static final Pattern TOKEN_PATTERN = Pattern.compile(
-            namedGroup(GROUP_STRING, "'(?:[^']++|'')*+(?:'|\\z)")
-            + '|' + namedGroup(GROUP_DOLLAR, "\\$\\$.*?(?:\\$\\$|\\z)")
+            namedGroup(GROUP_STRING, STRING_LITERAL_REGEX)
+            + '|' + namedGroup(GROUP_DOLLAR, DOLLAR_LITERAL_REGEX)
             + '|' + namedGroup(GROUP_IGNORABLE, "\\s++|--[^\\n]*+|//[^\\n]*+|/\\*.*?(?:\\*/|\\z)")
             + '|' + namedGroup(GROUP_WORD, "\\w++")
             + '|' + namedGroup(GROUP_EQUALS, "=")
             + "|\"(?:[^\"]++|\"\")*+(?:\"|\\z)"
             + "|.",
+            Pattern.DOTALL);
+
+    /**
+     * Matches the PASSWORD keyword anywhere in a statement, including inside literals and identifiers,
+     * when it is directly followed by a literal. Used as a fallback for statements that could not be parsed,
+     * where unbalanced quotes may make the tokenized view differ from what the author intended.
+     */
+    private static final Pattern RAW_PASSWORD_PATTERN =
+            Pattern.compile("\\bpassword\\s*+=?\\s*+(?='|\\$\\$)", Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern LITERAL_PATTERN = Pattern.compile(
+            namedGroup(GROUP_STRING, STRING_LITERAL_REGEX) + '|' + namedGroup(GROUP_DOLLAR, DOLLAR_LITERAL_REGEX),
             Pattern.DOTALL);
 
     private static final Set<Permission> PASSWORD_PERMISSIONS = ImmutableSet.of(Permission.CREATE, Permission.ALTER);
@@ -70,7 +85,8 @@ public class PasswordObfuscator implements AuditObfuscator
         {
             AuditEntry obfuscatedEntry = entry;
 
-            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString());
+            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString(),
+                                                            entry.hasKnownOperation());
             if (!entry.getOperation().getOperationString().equals(obfuscatedOperation))
             {
                 obfuscatedEntry = AuditEntry.newBuilder()
@@ -105,10 +121,21 @@ public class PasswordObfuscator implements AuditObfuscator
      * A password literal is a string literal or dollar quoted literal following the PASSWORD keyword,
      * optionally separated by an equals sign. This covers both PASSWORD and HASHED PASSWORD options.
      *
+     * <p>
+     * Statements that could not be parsed may contain unbalanced quotes. For those, every literal following
+     * a PASSWORD keyword is also obfuscated regardless of quoting, possibly obfuscating more than the password.
+     *
      * @param operation the query to obfuscate passwords in
+     * @param knownOperation true if the query was successfully parsed
      * @return a query with obfuscated passwords if present
      */
-    private String obfuscateOperation(String operation)
+    private String obfuscateOperation(String operation, boolean knownOperation)
+    {
+        String obfuscated = obfuscateTokenizedOperation(operation);
+        return knownOperation ? obfuscated : obfuscateRawOperation(obfuscated);
+    }
+
+    private static String obfuscateTokenizedOperation(String operation)
     {
         StringBuilder obfuscated = new StringBuilder(operation.length());
         Matcher tokenMatcher = TOKEN_PATTERN.matcher(operation);
@@ -138,6 +165,40 @@ public class PasswordObfuscator implements AuditObfuscator
         }
 
         return modified ? obfuscated.toString() : operation;
+    }
+
+    private static String obfuscateRawOperation(String operation)
+    {
+        StringBuilder obfuscated = new StringBuilder(operation.length());
+        Matcher keywordMatcher = RAW_PASSWORD_PATTERN.matcher(operation);
+        Matcher literalMatcher = LITERAL_PATTERN.matcher(operation);
+        int copied = 0;
+
+        while (keywordMatcher.find())
+        {
+            int literalStart = keywordMatcher.end();
+            literalMatcher.region(literalStart, operation.length());
+            if (!literalMatcher.lookingAt())
+            {
+                continue;
+            }
+
+            if (literalStart >= copied)
+            {
+                obfuscated.append(operation, copied, literalStart)
+                          .append(literalMatcher.group(GROUP_DOLLAR) == null
+                                  ? QUOTED_PASSWORD_OBFUSCATED
+                                  : DOLLAR_QUOTED_PASSWORD_OBFUSCATED);
+            }
+            copied = Math.max(copied, literalMatcher.end());
+        }
+
+        if (copied == 0)
+        {
+            return operation;
+        }
+
+        return obfuscated.append(operation.substring(copied)).toString();
     }
 
     private static String namedGroup(String name, String regex)

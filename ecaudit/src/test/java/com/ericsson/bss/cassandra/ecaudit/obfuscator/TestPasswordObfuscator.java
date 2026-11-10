@@ -217,6 +217,20 @@ public class TestPasswordObfuscator
         validateUnknownQueries(queries);
     }
 
+    @Test
+    public void testUnparsedStatementWithUnbalancedQuotesObfuscation()
+    {
+        Map<String, String> queries = new HashMap<>();
+        queries.put("CREATE ROLE 'bob WITH PASSWORD = 'secret value' AND LOGIN = true",
+                    "CREATE ROLE 'bob WITH PASSWORD = '*****' AND LOGIN = true");
+        queries.put("ALTER ROLE \"bob WITH PASSWORD = $$secret value$$;",
+                    "ALTER ROLE \"bob WITH PASSWORD = $$*****$$;");
+        queries.put("CREATE ROLE 'x password ' WITH PASSWORD = 'secret value",
+                    "CREATE ROLE 'x password '*****'");
+
+        validateUnknownQueries(queries);
+    }
+
     private void validateUnmodifiedQueries(List<String> queries, String username, Permission permission)
     {
         for (String query : queries)
