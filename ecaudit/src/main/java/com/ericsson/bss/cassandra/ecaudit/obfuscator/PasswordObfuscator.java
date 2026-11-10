@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.auth.RoleResource;
+import org.apache.cassandra.cql3.QueryProcessor;
 
 import com.ericsson.bss.cassandra.ecaudit.entry.AuditEntry;
 import com.ericsson.bss.cassandra.ecaudit.common.record.SimpleAuditOperation;
@@ -45,34 +46,29 @@ public class PasswordObfuscator implements AuditObfuscator
     private static final String GROUP_IGNORABLE = "ignorable";
     private static final String GROUP_WORD = "word";
     private static final String GROUP_EQUALS = "equals";
-    private static final String GROUP_STRING_END = "stringEnd";
-    private static final String GROUP_DOLLAR_END = "dollarEnd";
-    private static final String GROUP_IDENTIFIER_END = "identifierEnd";
-    private static final String GROUP_COMMENT_END = "commentEnd";
 
-    private static final String STRING_LITERAL_REGEX = "'(?:[^']++|'')*+" + namedGroup(GROUP_STRING_END, "'") + '?';
-    private static final String DOLLAR_LITERAL_REGEX = "\\$\\$(?:.*?" + namedGroup(GROUP_DOLLAR_END, "\\$\\$") + "|.*+)";
+    private static final String STRING_LITERAL_REGEX = "'(?:[^']++|'')*+(?:'|\\z)";
+    private static final String DOLLAR_LITERAL_REGEX = "\\$\\$.*?(?:\\$\\$|\\z)";
 
     /**
      * Splits a CQL statement into tokens. String literals, dollar quoted literals, quoted identifiers
      * and comments are consumed as whole tokens so that their content is never mistaken for a keyword.
-     * Unterminated literals, quoted identifiers and block comments extend to the end of the statement.
+     * Unterminated literals extend to the end of the statement.
      */
     private static final Pattern TOKEN_PATTERN = Pattern.compile(
             namedGroup(GROUP_STRING, STRING_LITERAL_REGEX)
             + '|' + namedGroup(GROUP_DOLLAR, DOLLAR_LITERAL_REGEX)
-            + '|' + namedGroup(GROUP_IGNORABLE,
-                    "\\s++|--[^\\n]*+|//[^\\n]*+|/\\*(?:.*?" + namedGroup(GROUP_COMMENT_END, "\\*/") + "|.*+)")
+            + '|' + namedGroup(GROUP_IGNORABLE, "\\s++|--[^\\n]*+|//[^\\n]*+|/\\*.*?(?:\\*/|\\z)")
             + '|' + namedGroup(GROUP_WORD, "\\w++")
             + '|' + namedGroup(GROUP_EQUALS, "=")
-            + "|\"(?:[^\"]++|\"\")*+" + namedGroup(GROUP_IDENTIFIER_END, "\"") + '?'
+            + "|\"(?:[^\"]++|\"\")*+(?:\"|\\z)"
             + "|.",
             Pattern.DOTALL);
 
     /**
      * Matches the PASSWORD keyword anywhere in a statement, including inside literals and identifiers,
-     * when it is directly followed by a literal. Used as a fallback for statements with unbalanced quoting,
-     * where the tokenized view may differ from what the author intended.
+     * when it is directly followed by a literal. Used as a fallback for statements that Cassandra cannot parse,
+     * where misplaced quotes may make the tokenized view differ from what the author intended.
      */
     private static final Pattern RAW_PASSWORD_PATTERN =
             Pattern.compile("\\bpassword\\s*+=?\\s*+(?='|\\$\\$)", Pattern.CASE_INSENSITIVE);
@@ -90,7 +86,8 @@ public class PasswordObfuscator implements AuditObfuscator
         {
             AuditEntry obfuscatedEntry = entry;
 
-            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString());
+            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString(),
+                                                            entry.hasKnownOperation());
             if (!entry.getOperation().getOperationString().equals(obfuscatedOperation))
             {
                 obfuscatedEntry = AuditEntry.newBuilder()
@@ -126,37 +123,31 @@ public class PasswordObfuscator implements AuditObfuscator
      * optionally separated by an equals sign. This covers both PASSWORD and HASHED PASSWORD options.
      *
      * <p>
-     * If the statement ends in an unterminated literal, quoted identifier or block comment, the quoting is
-     * unbalanced and the statement is rejected by Cassandra. For such statements every literal following
+     * Statements that Cassandra cannot parse may contain misplaced quotes. For those, every literal following
      * a PASSWORD keyword is also obfuscated regardless of quoting, possibly obfuscating more than the password.
+     * Such statements are never executed, so this cannot hide an executed statement from the audit log.
      *
      * @param operation the query to obfuscate passwords in
+     * @param knownOperation true if the query was successfully parsed and mapped
      * @return a query with obfuscated passwords if present
      */
-    private String obfuscateOperation(String operation)
+    private String obfuscateOperation(String operation, boolean knownOperation)
     {
         String obfuscated = obfuscateTokenizedOperation(operation);
-        return hasUnterminatedToken(operation) ? obfuscateRawOperation(obfuscated) : obfuscated;
+        return knownOperation || isParsable(operation) ? obfuscated : obfuscateRawOperation(obfuscated);
     }
 
-    private static boolean hasUnterminatedToken(String operation)
+    private static boolean isParsable(String operation)
     {
-        Matcher tokenMatcher = TOKEN_PATTERN.matcher(operation);
-        boolean unterminated = false;
-        while (tokenMatcher.find())
+        try
         {
-            unterminated = isUnterminated(tokenMatcher);
+            QueryProcessor.parseStatement(operation);
+            return true;
         }
-        return unterminated;
-    }
-
-    private static boolean isUnterminated(Matcher tokenMatcher)
-    {
-        String token = tokenMatcher.group();
-        return token.startsWith("'") && tokenMatcher.group(GROUP_STRING_END) == null
-               || token.startsWith("$$") && tokenMatcher.group(GROUP_DOLLAR_END) == null
-               || token.startsWith("\"") && tokenMatcher.group(GROUP_IDENTIFIER_END) == null
-               || token.startsWith("/*") && tokenMatcher.group(GROUP_COMMENT_END) == null;
+        catch (RuntimeException e)
+        {
+            return false;
+        }
     }
 
     private static String obfuscateTokenizedOperation(String operation)

@@ -227,12 +227,14 @@ public class TestPasswordObfuscator
                     "ALTER ROLE \"bob WITH PASSWORD = $$*****$$;");
         queries.put("CREATE ROLE 'x password ' WITH PASSWORD = 'secret value",
                     "CREATE ROLE 'x password '*****'");
+        queries.put("CREATE ROLE 'bob WITH PASSWORD = ' secret value 'x'",
+                    "CREATE ROLE 'bob WITH PASSWORD = '*****'x'");
 
         validateUnknownQueries(queries);
     }
 
     @Test
-    public void testNoRawObfuscationOfBalancedUnparsedStatement()
+    public void testNoRawObfuscationOfParsableUnknownStatement()
     {
         List<String> queries = Arrays.asList(
         "SELECT * FROM ks.tbl /* password ' */ WHERE id = 'x'",
