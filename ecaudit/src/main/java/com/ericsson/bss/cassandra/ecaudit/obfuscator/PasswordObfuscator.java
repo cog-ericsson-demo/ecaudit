@@ -45,29 +45,34 @@ public class PasswordObfuscator implements AuditObfuscator
     private static final String GROUP_IGNORABLE = "ignorable";
     private static final String GROUP_WORD = "word";
     private static final String GROUP_EQUALS = "equals";
+    private static final String GROUP_STRING_END = "stringEnd";
+    private static final String GROUP_DOLLAR_END = "dollarEnd";
+    private static final String GROUP_IDENTIFIER_END = "identifierEnd";
+    private static final String GROUP_COMMENT_END = "commentEnd";
 
-    private static final String STRING_LITERAL_REGEX = "'(?:[^']++|'')*+(?:'|\\z)";
-    private static final String DOLLAR_LITERAL_REGEX = "\\$\\$.*?(?:\\$\\$|\\z)";
+    private static final String STRING_LITERAL_REGEX = "'(?:[^']++|'')*+" + namedGroup(GROUP_STRING_END, "'") + '?';
+    private static final String DOLLAR_LITERAL_REGEX = "\\$\\$(?:.*?" + namedGroup(GROUP_DOLLAR_END, "\\$\\$") + "|.*+)";
 
     /**
      * Splits a CQL statement into tokens. String literals, dollar quoted literals, quoted identifiers
      * and comments are consumed as whole tokens so that their content is never mistaken for a keyword.
-     * Unterminated literals extend to the end of the statement.
+     * Unterminated literals, quoted identifiers and block comments extend to the end of the statement.
      */
     private static final Pattern TOKEN_PATTERN = Pattern.compile(
             namedGroup(GROUP_STRING, STRING_LITERAL_REGEX)
             + '|' + namedGroup(GROUP_DOLLAR, DOLLAR_LITERAL_REGEX)
-            + '|' + namedGroup(GROUP_IGNORABLE, "\\s++|--[^\\n]*+|//[^\\n]*+|/\\*.*?(?:\\*/|\\z)")
+            + '|' + namedGroup(GROUP_IGNORABLE,
+                    "\\s++|--[^\\n]*+|//[^\\n]*+|/\\*(?:.*?" + namedGroup(GROUP_COMMENT_END, "\\*/") + "|.*+)")
             + '|' + namedGroup(GROUP_WORD, "\\w++")
             + '|' + namedGroup(GROUP_EQUALS, "=")
-            + "|\"(?:[^\"]++|\"\")*+(?:\"|\\z)"
+            + "|\"(?:[^\"]++|\"\")*+" + namedGroup(GROUP_IDENTIFIER_END, "\"") + '?'
             + "|.",
             Pattern.DOTALL);
 
     /**
      * Matches the PASSWORD keyword anywhere in a statement, including inside literals and identifiers,
-     * when it is directly followed by a literal. Used as a fallback for statements that could not be parsed,
-     * where unbalanced quotes may make the tokenized view differ from what the author intended.
+     * when it is directly followed by a literal. Used as a fallback for statements with unbalanced quoting,
+     * where the tokenized view may differ from what the author intended.
      */
     private static final Pattern RAW_PASSWORD_PATTERN =
             Pattern.compile("\\bpassword\\s*+=?\\s*+(?='|\\$\\$)", Pattern.CASE_INSENSITIVE);
@@ -85,8 +90,7 @@ public class PasswordObfuscator implements AuditObfuscator
         {
             AuditEntry obfuscatedEntry = entry;
 
-            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString(),
-                                                            entry.hasKnownOperation());
+            String obfuscatedOperation = obfuscateOperation(entry.getOperation().getOperationString());
             if (!entry.getOperation().getOperationString().equals(obfuscatedOperation))
             {
                 obfuscatedEntry = AuditEntry.newBuilder()
@@ -122,17 +126,37 @@ public class PasswordObfuscator implements AuditObfuscator
      * optionally separated by an equals sign. This covers both PASSWORD and HASHED PASSWORD options.
      *
      * <p>
-     * Statements that could not be parsed may contain unbalanced quotes. For those, every literal following
+     * If the statement ends in an unterminated literal, quoted identifier or block comment, the quoting is
+     * unbalanced and the statement is rejected by Cassandra. For such statements every literal following
      * a PASSWORD keyword is also obfuscated regardless of quoting, possibly obfuscating more than the password.
      *
      * @param operation the query to obfuscate passwords in
-     * @param knownOperation true if the query was successfully parsed
      * @return a query with obfuscated passwords if present
      */
-    private String obfuscateOperation(String operation, boolean knownOperation)
+    private String obfuscateOperation(String operation)
     {
         String obfuscated = obfuscateTokenizedOperation(operation);
-        return knownOperation ? obfuscated : obfuscateRawOperation(obfuscated);
+        return hasUnterminatedToken(operation) ? obfuscateRawOperation(obfuscated) : obfuscated;
+    }
+
+    private static boolean hasUnterminatedToken(String operation)
+    {
+        Matcher tokenMatcher = TOKEN_PATTERN.matcher(operation);
+        boolean unterminated = false;
+        while (tokenMatcher.find())
+        {
+            unterminated = isUnterminated(tokenMatcher);
+        }
+        return unterminated;
+    }
+
+    private static boolean isUnterminated(Matcher tokenMatcher)
+    {
+        String token = tokenMatcher.group();
+        return token.startsWith("'") && tokenMatcher.group(GROUP_STRING_END) == null
+               || token.startsWith("$$") && tokenMatcher.group(GROUP_DOLLAR_END) == null
+               || token.startsWith("\"") && tokenMatcher.group(GROUP_IDENTIFIER_END) == null
+               || token.startsWith("/*") && tokenMatcher.group(GROUP_COMMENT_END) == null;
     }
 
     private static String obfuscateTokenizedOperation(String operation)

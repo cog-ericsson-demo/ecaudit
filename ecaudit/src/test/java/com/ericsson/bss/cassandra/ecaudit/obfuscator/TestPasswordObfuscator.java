@@ -231,6 +231,27 @@ public class TestPasswordObfuscator
         validateUnknownQueries(queries);
     }
 
+    @Test
+    public void testNoRawObfuscationOfBalancedUnparsedStatement()
+    {
+        List<String> queries = Arrays.asList(
+        "SELECT * FROM ks.tbl /* password ' */ WHERE id = 'x'",
+        "SELECT * FROM ks.tbl WHERE comment = 'password ' AND id = 'x'");
+
+        for (String query : queries)
+        {
+            AuditEntry entry = AuditEntry.newBuilder()
+                                         .operation(new SimpleAuditOperation(query))
+                                         .permissions(Permission.ALL)
+                                         .resource(DataResource.root())
+                                         .knownOperation(false)
+                                         .build();
+
+            AuditEntry obfuscated = myObfuscator.obfuscate(entry);
+            assertThat(obfuscated.getOperation().getOperationString()).isEqualTo(query);
+        }
+    }
+
     private void validateUnmodifiedQueries(List<String> queries, String username, Permission permission)
     {
         for (String query : queries)
