@@ -74,10 +74,11 @@ public class TestFieldEscaper
     }
 
     @Test
-    public void testOverlappingEscapeCharactersAreEscapedOnce()
+    public void testOverlappingEscapeCharactersAreAllEscaped()
     {
         assertThat(FieldEscaper.escapeCharacters("ab", Arrays.asList("ab", "a"))).isEqualTo("\\ab");
         assertThat(FieldEscaper.escapeCharacters("ab", Arrays.asList("a", "ab"))).isEqualTo("\\ab");
-        assertThat(FieldEscaper.escapeCharacters("a|ab", Arrays.asList("a", "ab", "|"))).isEqualTo("\\a\\|\\ab");
+        assertThat(FieldEscaper.escapeCharacters("x|bob", Arrays.asList("x|", "|"))).isEqualTo("\\x\\|bob");
+        assertThat(FieldEscaper.escapeCharacters("aab", Collections.singleton("ab"))).isEqualTo("a\\ab");
     }
 }
