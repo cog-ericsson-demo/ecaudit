@@ -17,6 +17,7 @@ package com.ericsson.bss.cassandra.ecaudit.filter.yaml;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -82,6 +83,50 @@ public class TestYamlAuditFilter
 
         assertThatExceptionOfType(ConfigurationException.class)
         .isThrownBy(filter::setup);
+    }
+
+    @Test
+    public void testShouldLogPrepareStatementsWhenNotSuppressed()
+    {
+        when(configMock.isSuppressPrepareStatements()).thenReturn(false);
+        YamlAuditFilter filter = new YamlAuditFilter(configMock);
+
+        assertThat(filter.shouldLogPrepareStatements()).isTrue();
+    }
+
+    @Test
+    public void testShouldNotLogPrepareStatementsWhenSuppressed()
+    {
+        when(configMock.isSuppressPrepareStatements()).thenReturn(true);
+        YamlAuditFilter filter = new YamlAuditFilter(configMock);
+
+        assertThat(filter.shouldLogPrepareStatements()).isFalse();
+    }
+
+    @Test
+    public void testEmptyWhitelistFiltersNoUsers()
+    {
+        when(configMock.getYamlWhitelist()).thenReturn(Collections.emptyList());
+        YamlAuditFilter filter = new YamlAuditFilter(configMock);
+        filter.setup();
+
+        assertThat(filter.isWhitelisted(toLogEntry("User1"))).isFalse();
+    }
+
+    @Test
+    public void testWhitelistIsReadOnSetupOnly()
+    {
+        when(configMock.getYamlWhitelist()).thenReturn(Arrays.asList("User1"), Arrays.asList("User2"));
+        YamlAuditFilter filter = new YamlAuditFilter(configMock);
+        filter.setup();
+
+        assertThat(filter.isWhitelisted(toLogEntry("User1"))).isTrue();
+        assertThat(filter.isWhitelisted(toLogEntry("User2"))).isFalse();
+
+        filter.setup();
+
+        assertThat(filter.isWhitelisted(toLogEntry("User1"))).isFalse();
+        assertThat(filter.isWhitelisted(toLogEntry("User2"))).isTrue();
     }
 
     private YamlAuditFilter givenConfiguredFilter()
