@@ -26,6 +26,7 @@ import com.google.common.collect.ImmutableMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.ericsson.bss.cassandra.ecaudit.common.formatter.FieldEscaper;
 import com.ericsson.bss.cassandra.ecaudit.common.formatter.LogMessageFormatter;
 import com.ericsson.bss.cassandra.ecaudit.entry.AuditEntry;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -106,12 +107,7 @@ public class Slf4jAuditLogger implements AuditLogger
 
     private static String sanitize(String input, Slf4jAuditLoggerConfig auditConfig)
     {
-        String sanitized = input;
-        for (String escapeCharacter : auditConfig.getEscapeCharacters())
-        {
-            sanitized = sanitized.replaceAll(escapeCharacter, "\\\\" + escapeCharacter);
-        }
-        return sanitized;
+        return FieldEscaper.escape(input, auditConfig.getEscapeCharacters());
     }
 
     private static Integer getPortOrNull(InetSocketAddress address)

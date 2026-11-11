@@ -50,6 +50,32 @@ public class TestEcLogYamlConfig
     }
 
     @Test
+    public void testDefaultEscapeCharacters()
+    {
+        EcLogYamlConfig defaultConfig = new EcLogYamlConfig();
+
+        assertThat(defaultConfig.getEscapeCharacters()).containsExactly("|");
+    }
+
+    @Test
+    public void testCustomEscapeCharacters()
+    {
+        EcLogYamlConfig config = new EcLogYamlConfig();
+        config.escape_characters = " \", ', ";
+
+        assertThat(config.getEscapeCharacters()).containsExactly("\"", "'");
+    }
+
+    @Test
+    public void testEmptyEscapeCharacters()
+    {
+        EcLogYamlConfig config = new EcLogYamlConfig();
+        config.escape_characters = "";
+
+        assertThat(config.getEscapeCharacters()).isEmpty();
+    }
+
+    @Test
     public void testDefaultTimeFormatter()
     {
         EcLogYamlConfig defaultConfig = new EcLogYamlConfig();

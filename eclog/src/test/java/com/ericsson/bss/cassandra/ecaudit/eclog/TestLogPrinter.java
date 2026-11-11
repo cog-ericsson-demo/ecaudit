@@ -36,6 +36,7 @@ import org.junit.runner.RunWith;
 import com.ericsson.bss.cassandra.ecaudit.common.record.Status;
 import com.ericsson.bss.cassandra.ecaudit.common.record.StoredAuditRecord;
 import com.ericsson.bss.cassandra.ecaudit.eclog.config.EcLogYamlConfig;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.mockito.stubbing.OngoingStubbing;
@@ -74,6 +75,38 @@ public class TestLogPrinter
         printer.print(reader);
 
         verify(stream).println(eq("0|1.2.3.4|5.6.7.8|king|ATTEMPT|Authentication operation"));
+    }
+
+    @Test(timeout = 5000)
+    public void testControlCharactersAndSeparatorAreEscapedByDefault()
+    {
+        ToolOptions options = ToolOptions.builder().withPath(DEFAULT_PATH).build();
+        LogPrinter printer = givenPrinter(options, 10);
+        StoredAuditRecord authRecord = mockRecord(0L, "1.2.3.4", null, "5.6.7.8", "x\n1|2|3|bob|SUCCEEDED|DROP\u001b[8m", Status.ATTEMPT, null, "select\r\n*\\");
+        QueueReader reader = givenReaderWithSingleRecord(authRecord);
+
+        printer.print(reader);
+
+        ArgumentCaptor<String> lineCaptor = ArgumentCaptor.forClass(String.class);
+        verify(stream).println(lineCaptor.capture());
+        assertThat(lineCaptor.getValue())
+        .doesNotContain("\n", "\r", "\u001b")
+        .isEqualTo("0|1.2.3.4|5.6.7.8|x\\n1\\|2\\|3\\|bob\\|SUCCEEDED\\|DROP\\u001b[8m|ATTEMPT|select\\r\\n*\\\\");
+    }
+
+    @Test(timeout = 5000)
+    public void testControlCharactersAreEscapedWithoutEscapeCharacters()
+    {
+        EcLogYamlConfig config = new EcLogYamlConfig();
+        config.log_format = "${USER}|${OPERATION_NAKED}";
+        config.escape_characters = "";
+        LogPrinter printer = givenPrinterWithConfig(config);
+        StoredAuditRecord authRecord = mockRecord(0L, "1.2.3.4", null, "5.6.7.8", "a|b\u009b", Status.ATTEMPT, null, "select\n*");
+        QueueReader reader = givenReaderWithSingleRecord(authRecord);
+
+        printer.print(reader);
+
+        verify(stream).println(eq("a|b\\u009b|select\\n* - naked"));
     }
 
     @Test(timeout = 5000)

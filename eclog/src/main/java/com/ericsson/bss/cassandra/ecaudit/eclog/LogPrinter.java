@@ -21,8 +21,10 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
+import com.ericsson.bss.cassandra.ecaudit.common.formatter.FieldEscaper;
 import com.ericsson.bss.cassandra.ecaudit.common.formatter.LogMessageFormatter;
 import com.ericsson.bss.cassandra.ecaudit.common.record.StoredAuditRecord;
 import com.ericsson.bss.cassandra.ecaudit.eclog.config.EcLogYamlConfig;
@@ -58,15 +60,16 @@ class LogPrinter
 
     static Map<String, Function<StoredAuditRecord, Object>> getAvailableFieldFunctionMap(EcLogYamlConfig config)
     {
+        Set<String> escapeCharacters = config.getEscapeCharacters();
         Map<String, Function<StoredAuditRecord, Object>> availableFields = new HashMap<>();
         availableFields.put("CLIENT_IP", entry -> entry.getClientAddress().map(InetAddress::getHostAddress).orElse(null));
         availableFields.put("CLIENT_PORT", entry -> entry.getClientPort().orElse(null));
         availableFields.put("COORDINATOR_IP", entry -> entry.getCoordinatorAddress().map(InetAddress::getHostAddress).orElse(null));
-        availableFields.put("USER", entry -> entry.getUser().orElse(null));
+        availableFields.put("USER", entry -> entry.getUser().map(value -> FieldEscaper.escape(value, escapeCharacters)).orElse(null));
         availableFields.put("BATCH_ID", entry -> entry.getBatchId().orElse(null));
         availableFields.put("STATUS", entry -> entry.getStatus().orElse(null));
-        availableFields.put("OPERATION", entry -> entry.getOperation().orElse(null));
-        availableFields.put("OPERATION_NAKED", entry -> entry.getNakedOperation().orElse(null));
+        availableFields.put("OPERATION", entry -> entry.getOperation().map(value -> FieldEscaper.escape(value, escapeCharacters)).orElse(null));
+        availableFields.put("OPERATION_NAKED", entry -> entry.getNakedOperation().map(value -> FieldEscaper.escape(value, escapeCharacters)).orElse(null));
         availableFields.put("TIMESTAMP", entry -> entry.getTimestamp().map(formatTimestamp(config)).orElse(null));
         return Collections.unmodifiableMap(availableFields);
     }

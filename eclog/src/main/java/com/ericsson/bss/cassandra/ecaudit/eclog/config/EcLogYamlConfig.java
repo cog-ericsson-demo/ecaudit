@@ -18,21 +18,47 @@ package com.ericsson.bss.cassandra.ecaudit.eclog.config;
 import java.time.DateTimeException;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Optional;
+import java.util.Set;
 
 @SuppressWarnings("PMD.FieldNamingConventions")
 public class EcLogYamlConfig
 {
     static final String DEFAULT_FORMAT = "{?${TIMESTAMP}?}{?|${CLIENT_IP}?}{?:${CLIENT_PORT}?}{?|${COORDINATOR_IP}?}{?|${USER}?}{?|${STATUS}?}{?|${BATCH_ID}?}{?|${OPERATION}?}";
+    static final String DEFAULT_ESCAPE_CHARACTERS = "|";
 
     // Configuration parameters - has to be public for SnakeYaml to inject values
     public String log_format;
     public String time_format;
     public String time_zone;
+    public String escape_characters;
 
     public String getLogFormat()
     {
         return log_format == null ? DEFAULT_FORMAT : log_format;
+    }
+
+    /**
+     * Characters to escape with a backslash in USER, OPERATION and OPERATION_NAKED, in addition to control characters
+     * which are always escaped. Defaults to the field separator of the default log format.
+     *
+     * @return the set of characters to escape
+     */
+    public Set<String> getEscapeCharacters()
+    {
+        String escape = escape_characters == null ? DEFAULT_ESCAPE_CHARACTERS : escape_characters;
+        Set<String> escapeChars = new LinkedHashSet<>();
+        for (String escapeChar : escape.split(","))
+        {
+            String trimmed = escapeChar.trim();
+            if (!trimmed.isEmpty())
+            {
+                escapeChars.add(trimmed);
+            }
+        }
+        return Collections.unmodifiableSet(escapeChars);
     }
 
     public Optional<DateTimeFormatter> getTimeFormatter()
