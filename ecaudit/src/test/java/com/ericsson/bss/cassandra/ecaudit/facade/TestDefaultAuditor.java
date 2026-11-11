@@ -93,6 +93,21 @@ public class TestDefaultAuditor
     }
 
     @Test
+    public void testAuditUnfilteredBypassesFilter()
+    {
+        AuditEntry logEntry = AuditEntry.newBuilder().build();
+        AuditEntry obfuscatedEntry = AuditEntry.newBuilder().build();
+        when(mockObfuscator.obfuscate(logEntry)).thenReturn(obfuscatedEntry);
+
+        auditor.auditUnfiltered(logEntry);
+
+        verify(mockObfuscator).obfuscate(logEntry);
+        verify(mockLogger).log(obfuscatedEntry);
+        verify(mockAuditMetrics).logAuditRequest(any(Long.class), eq(TimeUnit.NANOSECONDS));
+        verifyNoInteractions(mockFilter);
+    }
+
+    @Test
     public void testAuditFiltered()
     {
         AuditEntry logEntry = AuditEntry.newBuilder().build();

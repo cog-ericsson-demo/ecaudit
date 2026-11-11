@@ -157,24 +157,46 @@ public class AuditAuthenticator implements IAuthenticator
             return decoratedSaslNegotiator.isComplete();
         }
 
+        /**
+         * The user name is claimed by the client and only verified by the wrapped negotiator.
+         * Records are therefore written once the outcome is known, so that whitelists can only
+         * suppress records of verified users. Records of failed attempts always bypass the whitelist.
+         */
         @Override
         public AuthenticatedUser getAuthenticatedUser() throws AuthenticationException
         {
             String userName = decoratedSaslNegotiator.getUser();
 
             long timestamp = System.currentTimeMillis();
-            auditAuth(userName, clientAddress, Status.ATTEMPT, timestamp);
+            AuthenticatedUser result;
             try
             {
-                AuthenticatedUser result = decoratedSaslNegotiator.getAuthenticatedUser();
+                result = decoratedSaslNegotiator.getAuthenticatedUser();
+            }
+            catch (RuntimeException e)
+            {
+                auditFailedAuth(userName, timestamp);
+                throw e;
+            }
+
+            try
+            {
+                auditAuth(userName, clientAddress, Status.ATTEMPT, timestamp);
                 auditAuth(userName, clientAddress, Status.SUCCEEDED, timestamp);
-                return result;
             }
             catch (RuntimeException e)
             {
                 auditAuth(userName, clientAddress, Status.FAILED, timestamp);
                 throw e;
             }
+            return result;
+        }
+
+        private void auditFailedAuth(String userName, long timestamp)
+        {
+            String subject = decoratedSaslNegotiator.getSubject().orElse(null);
+            auditAdapter.auditUnverifiedAuth(userName, clientAddress, subject, Status.ATTEMPT, timestamp);
+            auditAdapter.auditUnverifiedAuth(userName, clientAddress, subject, Status.FAILED, timestamp);
         }
 
         private void auditAuth(String userName, InetAddress clientAddress, Status status, long timestamp)

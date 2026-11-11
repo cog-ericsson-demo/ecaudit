@@ -39,6 +39,7 @@ import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.auth.IRoleManager;
 import org.apache.cassandra.exceptions.AuthenticationException;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
 
@@ -46,6 +47,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -196,7 +201,53 @@ public class TestAuditAuthenticator
         SaslNegotiator negotiator = auditAuthenticator.newSaslNegotiator(mockClientAddress);
 
         assertThatExceptionOfType(AuthenticationException.class).isThrownBy(negotiator::getAuthenticatedUser);
+        verify(mockAuditAdapter, times(1)).auditUnverifiedAuth(eq("audited_user"), eq(mockClientAddress), isNull(), eq(Status.ATTEMPT), anyLong());
+        verify(mockAuditAdapter, times(1)).auditUnverifiedAuth(eq("audited_user"), eq(mockClientAddress), isNull(), eq(Status.FAILED), anyLong());
+    }
+
+    @Test
+    public void testWhenAuthenticationWithSubjectFailsIsAuditedUnverified()
+    {
+        when(mockSaslNegotiator.getUser()).thenReturn("audited_user");
+        when(mockSaslNegotiator.getSubject()).thenReturn(Optional.of("subject_user"));
+        when(mockSaslNegotiator.getAuthenticatedUser()).thenThrow(new AuthenticationException("audited_user"));
+
+        SaslNegotiator negotiator = auditAuthenticator.newSaslNegotiator(mockClientAddress);
+
+        assertThatExceptionOfType(AuthenticationException.class).isThrownBy(negotiator::getAuthenticatedUser);
+        verify(mockAuditAdapter, times(1)).auditUnverifiedAuth(eq("audited_user"), eq(mockClientAddress), eq("subject_user"), eq(Status.ATTEMPT), anyLong());
+        verify(mockAuditAdapter, times(1)).auditUnverifiedAuth(eq("audited_user"), eq(mockClientAddress), eq("subject_user"), eq(Status.FAILED), anyLong());
+    }
+
+    @Test
+    public void testAttemptIsAuditedAfterCredentialsAreVerified()
+    {
+        AuthenticatedUser expected = mock(AuthenticatedUser.class);
+        when(mockSaslNegotiator.getAuthenticatedUser()).thenReturn(expected);
+        when(mockSaslNegotiator.getUser()).thenReturn("audited_user");
+
+        SaslNegotiator negotiator = auditAuthenticator.newSaslNegotiator(mockClientAddress);
+        negotiator.getAuthenticatedUser();
+
+        InOrder inOrder = inOrder(mockSaslNegotiator, mockAuditAdapter);
+        inOrder.verify(mockSaslNegotiator).getAuthenticatedUser();
+        inOrder.verify(mockAuditAdapter).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.ATTEMPT), anyLong());
+        inOrder.verify(mockAuditAdapter).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.SUCCEEDED), anyLong());
+    }
+
+    @Test
+    public void testWhenAuditingSuccessFailsFailureIsAudited()
+    {
+        AuthenticatedUser expected = mock(AuthenticatedUser.class);
+        when(mockSaslNegotiator.getAuthenticatedUser()).thenReturn(expected);
+        when(mockSaslNegotiator.getUser()).thenReturn("audited_user");
+        lenient().doThrow(new AuthenticationException("audit failure")).when(mockAuditAdapter).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.SUCCEEDED), anyLong());
+
+        SaslNegotiator negotiator = auditAuthenticator.newSaslNegotiator(mockClientAddress);
+
+        assertThatExceptionOfType(AuthenticationException.class).isThrownBy(negotiator::getAuthenticatedUser);
         verify(mockAuditAdapter, times(1)).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.ATTEMPT), anyLong());
+        verify(mockAuditAdapter, times(1)).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.SUCCEEDED), anyLong());
         verify(mockAuditAdapter, times(1)).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.FAILED), anyLong());
     }
 

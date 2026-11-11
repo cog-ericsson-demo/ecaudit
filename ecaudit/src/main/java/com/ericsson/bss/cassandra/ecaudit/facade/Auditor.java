@@ -36,6 +36,14 @@ public interface Auditor
     void audit(AuditEntry logEntry);
 
     /**
+     * Commit an audit log entry to the audit log without consulting the audit filter (whitelist).
+     *
+     * @param logEntry
+     *            the log entry to commit
+     */
+    void auditUnfiltered(AuditEntry logEntry);
+
+    /**
      * Setup is called once upon system startup to initialize the Auditor.
      *
      * For example, use this method to create any required keyspaces/tables.

@@ -34,6 +34,7 @@ import org.junit.runner.RunWith;
 import com.ericsson.bss.cassandra.ecaudit.auth.ConnectionResource;
 import com.ericsson.bss.cassandra.ecaudit.auth.GrantResource;
 import com.ericsson.bss.cassandra.ecaudit.auth.WhitelistDataAccess;
+import com.ericsson.bss.cassandra.ecaudit.common.record.Status;
 import com.ericsson.bss.cassandra.ecaudit.entry.AuditEntry;
 import com.ericsson.bss.cassandra.ecaudit.test.mode.ClientInitializer;
 import org.apache.cassandra.auth.DataResource;
@@ -54,6 +55,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.StrictStubs.class)
@@ -220,6 +222,35 @@ public class TestRoleAuditFilter
     }
 
     @Test
+    public void whitelistedConnectionFailedIsNotWhitelisted()
+    {
+        AuditEntry auditEntry = givenAuditEntry(Collections.singleton(Permission.EXECUTE), ConnectionResource.root(), Status.FAILED);
+
+        assertThat(filter.isWhitelisted(auditEntry)).isFalse();
+        verifyNoInteractions(getRolesFunctionMock);
+    }
+
+    @Test
+    public void whitelistedConnectionSucceededIsWhitelisted()
+    {
+        givenRoleIsWhitelisted("primary", Permission.EXECUTE, ConnectionResource.root());
+        givenRolesOfRequest("primary");
+        AuditEntry auditEntry = givenAuditEntry(Collections.singleton(Permission.EXECUTE), ConnectionResource.root(), Status.SUCCEEDED);
+
+        assertThat(filter.isWhitelisted(auditEntry)).isTrue();
+    }
+
+    @Test
+    public void whitelistedDataFailedIsWhitelisted()
+    {
+        givenRoleIsWhitelisted("primary", Permission.SELECT, DataResource.root());
+        givenRolesOfRequest("primary");
+        AuditEntry auditEntry = givenAuditEntry(Collections.singleton(Permission.SELECT), DataResource.fromName("data/ks/tbl"), Status.FAILED);
+
+        assertThat(filter.isWhitelisted(auditEntry)).isTrue();
+    }
+
+    @Test
     public void roleDoConnect()
     {
         givenRolesOfRequest("primary", "inherited");
@@ -288,10 +319,16 @@ public class TestRoleAuditFilter
 
     private AuditEntry givenAuditEntry(Set<Permission> permissions, IResource resource)
     {
+        return givenAuditEntry(permissions, resource, Status.ATTEMPT);
+    }
+
+    private AuditEntry givenAuditEntry(Set<Permission> permissions, IResource resource, Status status)
+    {
         return AuditEntry.newBuilder()
                          .permissions(permissions)
                          .resource(resource)
                          .user(USER)
+                         .status(status)
                          .build();
     }
 
