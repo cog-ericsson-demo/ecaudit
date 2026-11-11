@@ -16,6 +16,7 @@
 package com.ericsson.bss.cassandra.ecaudit.auth;
 
 import java.net.InetAddress;
+import java.security.cert.Certificate;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -40,6 +41,8 @@ import org.apache.cassandra.auth.IRoleManager;
 import org.apache.cassandra.exceptions.AuthenticationException;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,6 +50,8 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -224,5 +229,45 @@ public class TestAuditAuthenticator
         assertThat(actual).isSameAs(expected);
         verify(mockAuditAdapter, times(1)).auditAuth(eq("audited_user"), eq(mockClientAddress), eq("subject_user"), eq(Status.ATTEMPT), anyLong());
         verify(mockAuditAdapter, times(1)).auditAuth(eq("audited_user"), eq(mockClientAddress), eq("subject_user"), eq(Status.SUCCEEDED), anyLong());
+    }
+
+    @Test
+    public void testSaslNegotiatorWithCertificatesIsDelegatedAndAudited()
+    {
+        Certificate[] certificates = new Certificate[]{ mock(Certificate.class) };
+        AuthenticatedUser expected = mock(AuthenticatedUser.class);
+        when(mockAuthenticator.newDecoratedSaslNegotiator(mockClientAddress, certificates)).thenReturn(mockSaslNegotiator);
+        when(mockSaslNegotiator.getAuthenticatedUser()).thenReturn(expected);
+        when(mockSaslNegotiator.getUser()).thenReturn("audited_user");
+
+        SaslNegotiator negotiator = auditAuthenticator.newSaslNegotiator(mockClientAddress, certificates);
+        AuthenticatedUser actual = negotiator.getAuthenticatedUser();
+
+        assertThat(actual).isSameAs(expected);
+        verify(mockAuthenticator, times(1)).newDecoratedSaslNegotiator(eq(mockClientAddress), eq(certificates));
+        verify(mockAuditAdapter, times(1)).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.ATTEMPT), anyLong());
+        verify(mockAuditAdapter, times(1)).auditAuth(eq("audited_user"), eq(mockClientAddress), eq(Status.SUCCEEDED), anyLong());
+    }
+
+    @Test
+    public void testDefaultConstructorUsesConfiguredAuthenticatorAndAdapterSingleton()
+    {
+        when(mockConfig.getWrappedAuthenticator()).thenReturn(DecoratedPasswordAuthenticator.class.getName());
+
+        try (MockedStatic<AuditConfig> auditConfig = mockStatic(AuditConfig.class);
+             MockedStatic<AuditAdapter> auditAdapter = mockStatic(AuditAdapter.class);
+             MockedConstruction<DecoratedPasswordAuthenticator> wrapped = mockConstruction(DecoratedPasswordAuthenticator.class,
+                                                                                          (mock, context) -> when(mock.requireAuthentication()).thenReturn(true)))
+        {
+            auditConfig.when(AuditConfig::getInstance).thenReturn(mockConfig);
+            auditAdapter.when(AuditAdapter::getInstance).thenReturn(mockAuditAdapter);
+
+            AuditAuthenticator authenticator = new AuditAuthenticator();
+
+            assertThat(authenticator.requireAuthentication()).isTrue();
+            assertThat(wrapped.constructed()).hasSize(1);
+            auditConfig.verify(AuditConfig::getInstance);
+            auditAdapter.verify(AuditAdapter::getInstance);
+        }
     }
 }

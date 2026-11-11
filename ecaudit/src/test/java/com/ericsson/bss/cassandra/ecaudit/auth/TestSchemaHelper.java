@@ -157,4 +157,30 @@ public class TestSchemaHelper
         long now = System.currentTimeMillis();
         assertThat(now - startTime).isGreaterThanOrEqualTo(millis);
     }
+
+    @Test
+    public void testInterruptedWhileWaitingReturnsFalseAndKeepsInterruptFlag() throws UnknownHostException
+    {
+        givenLocalStateOrder(currentEndpointState);
+        givenRemoteStateOrder(previousEndpointState);
+
+        Thread.currentThread().interrupt();
+        try
+        {
+            assertThat(schemaHelper.areSchemasAligned(10 * RETRY_INTERVAL_MILLIS)).isFalse();
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        }
+        finally
+        {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    public void testDefaultConstructorWithoutGossipStateIsNotAligned()
+    {
+        SchemaHelper defaultSchemaHelper = new SchemaHelper();
+
+        assertThat(defaultSchemaHelper.areSchemasAligned(0)).isFalse();
+    }
 }
