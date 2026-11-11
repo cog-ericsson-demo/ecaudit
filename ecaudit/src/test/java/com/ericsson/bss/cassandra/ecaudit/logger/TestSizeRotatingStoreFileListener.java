@@ -23,10 +23,14 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.slf4j.LoggerFactory;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import org.mockito.junit.MockitoJUnitRunner;
 
@@ -40,11 +44,21 @@ public class TestSizeRotatingStoreFileListener
 
     private SizeRotatingStoreFileListener storeFileListener;
 
+    private final Logger listenerLogger = (Logger) LoggerFactory.getLogger(SizeRotatingStoreFileListener.class);
+    private Level originalLevel;
+
     @Before
     public void before()
     {
         tempDir = com.google.common.io.Files.createTempDir();
         tempDir.deleteOnExit();
+        originalLevel = listenerLogger.getLevel();
+    }
+
+    @After
+    public void after()
+    {
+        listenerLogger.setLevel(originalLevel);
     }
 
     @Test
@@ -163,6 +177,80 @@ public class TestSizeRotatingStoreFileListener
         firstFiles.forEach(file -> assertThat(file).doesNotExist());
         lostFiles.forEach(file -> assertThat(file).doesNotExist());
         moreFiles.forEach(file -> assertThat(file).doesNotExist());
+        lastFiles.forEach(file -> assertThat(file).exists());
+    }
+
+    @Test
+    public void testRotationWithLoggingDisabled() throws IOException
+    {
+        listenerLogger.setLevel(Level.OFF);
+        givenStoreFileListener(49);
+        List<File> firstFiles = givenRotatedFiles(10, 10);
+        List<File> lostFiles = givenRotatedFiles(10, 2);
+        lostFiles.forEach(file -> assertThat(file.delete()).isTrue());
+        List<File> lastFiles = givenRotatedFiles(10, 4);
+
+        firstFiles.forEach(file -> assertThat(file).doesNotExist());
+        lastFiles.forEach(file -> assertThat(file).exists());
+    }
+
+    @Test
+    public void testBelowThresholdNothingIsDeleted() throws IOException
+    {
+        givenStoreFileListener(49);
+        List<File> files = givenRotatedFiles(10, 4);
+
+        files.forEach(file -> assertThat(file).exists());
+    }
+
+    @Test
+    public void testExactlyAtThresholdNothingIsDeleted() throws IOException
+    {
+        givenStoreFileListener(50);
+        List<File> files = givenRotatedFiles(10, 5);
+
+        files.forEach(file -> assertThat(file).exists());
+    }
+
+    @Test
+    public void testAcquireAfterBootstrapDoesNotEnqueueAgain() throws IOException
+    {
+        List<File> existingFiles = givenExistingFiles(10, 2);
+        givenStoreFileListener(49);
+        File active = createFile(10);
+        storeFileListener.onAcquired(1, active);
+        storeFileListener.onAcquired(1, active);
+        storeFileListener.onReleased(1, active);
+
+        existingFiles.forEach(file -> assertThat(file).exists());
+        assertThat(active).exists();
+
+        List<File> lastFiles = givenRotatedFiles(10, 2);
+
+        assertThat(existingFiles.get(0)).doesNotExist();
+        assertThat(existingFiles.get(1)).exists();
+        assertThat(active).exists();
+        lastFiles.forEach(file -> assertThat(file).exists());
+    }
+
+    @Test
+    public void testSurviveAccountedSizeAboveThresholdWithNoFileLeft() throws IOException
+    {
+        List<File> existingFiles = givenExistingFiles(50, 1);
+        givenStoreFileListener(49);
+        File active = createFile(0);
+        storeFileListener.onAcquired(1, active);
+
+        // Shrink the bootstrapped file so its tracked size cannot be reclaimed by deleting it
+        Files.write(existingFiles.get(0).toPath(), new byte[0]);
+        storeFileListener.onReleased(1, active);
+
+        assertThat(existingFiles.get(0)).doesNotExist();
+        assertThat(active).doesNotExist();
+
+        List<File> firstFiles = givenRotatedFiles(10, 10);
+        List<File> lastFiles = givenRotatedFiles(10, 4);
+        firstFiles.forEach(file -> assertThat(file).doesNotExist());
         lastFiles.forEach(file -> assertThat(file).exists());
     }
 

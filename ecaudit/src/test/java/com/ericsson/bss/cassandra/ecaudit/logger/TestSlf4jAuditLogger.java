@@ -18,6 +18,7 @@ package com.ericsson.bss.cassandra.ecaudit.logger;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -33,6 +34,7 @@ import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.Appender;
@@ -253,6 +255,43 @@ public class TestSlf4jAuditLogger
 
         Function<AuditEntry, Object> timestampFunction = Slf4jAuditLogger.getTimeFunction(configMock);
         assertThat(timestampFunction.apply(logEntryWithAll)).isEqualTo("1970-01-01T00:00:00.042Z"); // 42 millis after EPOCH
+    }
+
+    @Test
+    public void testParameterConstructorWithLoggerName()
+    {
+        Slf4jAuditLogger logger = new Slf4jAuditLogger(Collections.singletonMap("log_format", "User = ${USER}, Status = ${STATUS}"), CUSTOM_LOGGER_NAME);
+        logger.log(logEntryWithoutBatch);
+
+        assertThat(getSlf4jLogMessage()).isEqualTo("User = user, Status = ATTEMPT");
+    }
+
+    @Test
+    public void testParameterConstructorWithLoggerNameAndDefaultFormat()
+    {
+        Slf4jAuditLogger logger = new Slf4jAuditLogger(Collections.emptyMap(), CUSTOM_LOGGER_NAME);
+        logger.log(logEntryWithAll);
+
+        assertThat(getSlf4jLogMessage())
+        .isEqualTo("client:'127.0.0.1'|user:'user'|batchId:'12345678-aaaa-bbbb-cccc-123456789abc'|status:'ATTEMPT'|operation:'insert into ks.tbl (key, val) values (?, ?)['kalle', 'anka']'");
+    }
+
+    @Test
+    public void testNothingIsLoggedWhenInfoIsDisabled()
+    {
+        ch.qos.logback.classic.Logger customLogger = (ch.qos.logback.classic.Logger) LOG;
+        Level originalLevel = customLogger.getLevel();
+        customLogger.setLevel(Level.WARN);
+        try
+        {
+            Slf4jAuditLogger logger = loggerWithConfig(DEFAULT_LOG_FORMAT);
+            logger.log(logEntryWithAll);
+        }
+        finally
+        {
+            customLogger.setLevel(originalLevel);
+        }
+        // No interaction with the appender is verified in after()
     }
 
     @Test
