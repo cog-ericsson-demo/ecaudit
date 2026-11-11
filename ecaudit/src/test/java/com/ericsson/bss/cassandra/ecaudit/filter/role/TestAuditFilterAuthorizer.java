@@ -17,7 +17,10 @@ package com.ericsson.bss.cassandra.ecaudit.filter.role;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
@@ -38,12 +41,16 @@ import org.apache.cassandra.auth.DataResource;
 import org.apache.cassandra.auth.IAuthorizer;
 import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.auth.Permission;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.schema.SchemaConstants;
 
 import static java.util.Arrays.asList;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @RunWith(JUnitParamsRunner.class)
@@ -84,6 +91,104 @@ public class TestAuditFilterAuthorizer
         assertThat(AUTHORIZER.getAuthorizer())
             .isInstanceOf(IAuthorizer.class)
             .isNotInstanceOf(AuditAuthorizer.class);
+    }
+
+    @Test
+    public void testGetAuthorizerResolvesFromDatabaseDescriptorOnce()
+    {
+        IAuthorizer authorizer = mock(IAuthorizer.class);
+        AuditFilterAuthorizer filterAuthorizer = new AuditFilterAuthorizer();
+
+        IAuthorizer first = withDatabaseDescriptorAuthorizer(authorizer, filterAuthorizer::getAuthorizer);
+        IAuthorizer second = withDatabaseDescriptorAuthorizer(mock(IAuthorizer.class), filterAuthorizer::getAuthorizer);
+
+        assertThat(first).isSameAs(authorizer);
+        assertThat(second).isSameAs(authorizer);
+    }
+
+    @Test
+    public void testGetAuthorizerUnwrapsAuditAuthorizer()
+    {
+        IAuthorizer wrappedAuthorizer = mock(IAuthorizer.class);
+        AuditAuthorizer auditAuthorizer = mock(AuditAuthorizer.class);
+        when(auditAuthorizer.getWrappedAuthorizer()).thenReturn(wrappedAuthorizer);
+        AuditFilterAuthorizer filterAuthorizer = new AuditFilterAuthorizer();
+
+        IAuthorizer resolved = withDatabaseDescriptorAuthorizer(auditAuthorizer, filterAuthorizer::getAuthorizer);
+
+        assertThat(resolved).isSameAs(wrappedAuthorizer);
+    }
+
+    @Test
+    public void testOperationAuthorizationResolvesWrappedAuthorizerLazily()
+    {
+        AuthenticatedUser user = new AuthenticatedUser(AUTH_USER);
+        IAuthorizer wrappedAuthorizer = mock(IAuthorizer.class);
+        when(wrappedAuthorizer.authorize(user, RESOURCE_TABLE)).thenReturn(Sets.newHashSet(Permission.SELECT));
+        AuditAuthorizer auditAuthorizer = mock(AuditAuthorizer.class);
+        when(auditAuthorizer.getWrappedAuthorizer()).thenReturn(wrappedAuthorizer);
+        AuditFilterAuthorizer filterAuthorizer = new AuditFilterAuthorizer();
+
+        boolean selectAuthorized = withDatabaseDescriptorAuthorizer(auditAuthorizer,
+            () -> filterAuthorizer.isOperationAuthorizedForUser(Permission.SELECT, AUTH_USER, asList(RESOURCE_TABLE)));
+        boolean alterAuthorized = filterAuthorizer.isOperationAuthorizedForUser(Permission.ALTER, AUTH_USER, asList(RESOURCE_TABLE));
+
+        assertThat(selectAuthorized).isTrue();
+        assertThat(alterAuthorized).isFalse();
+        verify(auditAuthorizer, never()).authorize(any(), any());
+    }
+
+    @Test
+    public void testSystemResourceSkipsAuthorizerLookup()
+    {
+        IAuthorizer authorizer = mock(IAuthorizer.class);
+        AuditFilterAuthorizer filterAuthorizer = new AuditFilterAuthorizer();
+        filterAuthorizer.setAuthorizer(authorizer);
+
+        List<DataResource> resources = toDataResources(SchemaConstants.SYSTEM_KEYSPACE_NAME, SystemKeyspace.LOCAL);
+
+        assertThat(filterAuthorizer.isOperationAuthorizedForUser(Permission.SELECT, AUTH_USER, resources)).isTrue();
+        verify(authorizer, never()).authorize(any(), any());
+    }
+
+    @Test
+    public void testEmptyResourceChainIsNotAuthorized()
+    {
+        assertThat(AUTHORIZER.isOperationAuthorizedForUser(Permission.SELECT, AUTH_USER, Collections.emptyList())).isFalse();
+        assertThat(AUTHORIZER.isOperationAuthorizedForUser(Permission.MODIFY, AUTH_USER, Collections.emptyList())).isFalse();
+    }
+
+    @Test
+    public void testConcurrentResolutionKeepsAuthorizerSetWhileWaiting() throws Exception
+    {
+        IAuthorizer descriptorAuthorizer = mock(IAuthorizer.class);
+        IAuthorizer injectedAuthorizer = mock(IAuthorizer.class);
+        AuditFilterAuthorizer filterAuthorizer = new AuditFilterAuthorizer();
+        AtomicReference<IAuthorizer> resolved = new AtomicReference<>();
+        Thread resolver = new Thread(() -> resolved.set(filterAuthorizer.getAuthorizer()));
+
+        IAuthorizer original = DatabaseDescriptor.getAuthorizer();
+        DatabaseDescriptor.setAuthorizer(descriptorAuthorizer);
+        try
+        {
+            synchronized (filterAuthorizer)
+            {
+                resolver.start();
+                while (resolver.getState() != Thread.State.BLOCKED)
+                {
+                    Thread.sleep(1);
+                }
+                filterAuthorizer.setAuthorizer(injectedAuthorizer);
+            }
+            resolver.join(10_000);
+        }
+        finally
+        {
+            DatabaseDescriptor.setAuthorizer(original);
+        }
+
+        assertThat(resolver.isAlive()).isFalse();
+        assertThat(resolved.get()).isSameAs(injectedAuthorizer);
     }
 
     @SuppressWarnings("unused")
@@ -142,6 +247,20 @@ public class TestAuditFilterAuthorizer
         for (Permission permission : NOT_OK)
         {
             assertThat(AUTHORIZER.isOperationAuthorizedForUser(permission, AUTH_USER, resources)).isEqualTo(false);
+        }
+    }
+
+    private static <T> T withDatabaseDescriptorAuthorizer(IAuthorizer authorizer, Supplier<T> action)
+    {
+        IAuthorizer original = DatabaseDescriptor.getAuthorizer();
+        DatabaseDescriptor.setAuthorizer(authorizer);
+        try
+        {
+            return action.get();
+        }
+        finally
+        {
+            DatabaseDescriptor.setAuthorizer(original);
         }
     }
 
