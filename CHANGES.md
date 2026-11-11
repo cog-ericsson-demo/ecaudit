@@ -2,6 +2,10 @@
 
 ## Version 3.1.5 (only flavor ecaudit_c5.0)
 
+* Always escape control characters in USER, SUBJECT, OPERATION and OPERATION_NAKED in the SLF4J logger and in eclog
+* Fix SLF4J logger escape_characters being interpreted as regular expressions
+* Escape the field separator `|` by default in eclog, configurable with escape_characters
+
 ## Version 3.1.4
 
 * Fix build error with Cassandra 5.0.6 (only flavor ecaudit_c5.0) - #401

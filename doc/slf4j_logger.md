@@ -23,7 +23,11 @@ To configure a custom log message format the following parameters can be configu
 | log_format        | Parameterized log message formatting string, see examples below                                                                                                        | the "legacy" format, see [README](../README.md) |
 | time_format       | time formatter pattern, see examples below or [DateTimeFormatter](https://docs.oracle.com/javase/8/docs/api/java/time/format/DateTimeFormatter.html#patterns)          | number of millis since EPOCH                    |
 | time_zone         | the time zone id, see examples below or [ZoneId](https://docs.oracle.com/javase/8/docs/api/java/time/ZoneId.html#of-java.lang.String-)                                 | system default                                  |
-| escape_characters | A comma separated list containing characters that should be escaped (using \\). The characters will be escaped in USER, SUBJECT, OPERATION and OPERATION_NAKED fields. | No escaping                                     |
+| escape_characters | A comma separated list containing characters that should be escaped (using \\). The characters will be escaped in USER, SUBJECT, OPERATION and OPERATION_NAKED fields. When set, backslash is escaped as well. | No escaping                                     |
+
+Control characters in the USER, SUBJECT, OPERATION and OPERATION_NAKED fields are always escaped, regardless of configuration,
+so that a client controlled value (such as a login username or a query) cannot inject new lines or terminal escape sequences into the log.
+CR and LF are written as `\r` and `\n`, other control characters (except tab) are written as `\uXXXX`.
 
 It is possible to configure a parameterized log message by providing a formatting string.
 The following fields are available:

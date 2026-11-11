@@ -59,6 +59,11 @@ The log file can be specified by the command line argument ```-c``` or placed in
 The configuration format/fields are the same as for SLF4J, see [Custom Log Message Format](slf4j_logger.md#custom-log-message-format).
 Conditional formatting is also supported.
 
+Control characters in the USER, OPERATION and OPERATION_NAKED fields are always escaped (CR and LF as `\r` and `\n`, others as `\uXXXX`),
+so that a record is always printed as a single line and cannot contain terminal escape sequences.
+In addition, the characters listed in the comma separated ```escape_characters``` option are escaped with a backslash in the same fields,
+and backslash itself is then escaped too. It defaults to `|`, the field separator of the default format. Set it to `""` to disable it.
+
 With a config like this:
 ```YAML
 log_format: "${TIMESTAMP} -> Client=${CLIENT_IP}, User=${USER}, Status=${STATUS}, Operation=${OPERATION}"

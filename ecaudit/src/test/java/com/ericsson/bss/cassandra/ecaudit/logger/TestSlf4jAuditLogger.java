@@ -33,6 +33,8 @@ import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.collect.ImmutableMap;
+
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.Appender;
@@ -172,6 +174,54 @@ public class TestSlf4jAuditLogger
         assertThat(getSlf4jLogMessage()).isEqualTo("{\"timestamp\": \""+EXPECTED_TIMESTAMP+"\"," +
                                                    "\"operation\": \"select somethingX from \\\"testKeyspace.table1\\\"\"," +
                                                    "\"user\": \""+EXPECTED_USER+"\"}");
+    }
+
+    @Test
+    public void testControlCharactersAreAlwaysEscaped()
+    {
+        Slf4jAuditLogger logger = loggerWithConfig(DEFAULT_LOG_FORMAT);
+        AuditOperation auditOperation = mock(AuditOperation.class);
+        when(auditOperation.getOperationString()).thenReturn("select *\r\nfrom tbl\u001b[8m");
+        AuditEntry logEntry = AuditEntry.newBuilder()
+                                        .basedOn(logEntryWithoutBatch)
+                                        .user("a\nclient:'1.2.3.4'|user:'bob'")
+                                        .operation(auditOperation)
+                                        .build();
+        logger.log(logEntry);
+
+        assertThat(getSlf4jLogMessage())
+        .doesNotContain("\n", "\r", "\u001b")
+        .isEqualTo("client:'127.0.0.1'|user:'a\\nclient:'1.2.3.4'|user:'bob''|status:'ATTEMPT'|operation:'select *\\r\\nfrom tbl\\u001b[8m'");
+    }
+
+    @Test
+    public void testControlCharactersAreEscapedInSubjectAndNakedOperation()
+    {
+        Slf4jAuditLogger logger = loggerWithConfig("${SUBJECT}|${OPERATION_NAKED}");
+        AuditOperation auditOperation = mock(AuditOperation.class);
+        when(auditOperation.getNakedOperationString()).thenReturn("select\n*");
+        AuditEntry logEntry = AuditEntry.newBuilder()
+                                        .basedOn(logEntryWithAll)
+                                        .subject("sub\rject")
+                                        .operation(auditOperation)
+                                        .build();
+        logger.log(logEntry);
+
+        assertThat(getSlf4jLogMessage()).isEqualTo("sub\\rject|select\\n*");
+    }
+
+    @Test
+    public void testConfiguredEscapeCharacterIsMatchedLiterally()
+    {
+        Slf4jAuditLoggerConfig config = new Slf4jAuditLoggerConfig(ImmutableMap.of("log_format", "${USER}", "escape_characters", "|"));
+        Slf4jAuditLogger logger = new Slf4jAuditLogger(config, LOG);
+        AuditEntry logEntry = AuditEntry.newBuilder()
+                                        .basedOn(logEntryWithAll)
+                                        .user("a|b\\c")
+                                        .build();
+        logger.log(logEntry);
+
+        assertThat(getSlf4jLogMessage()).isEqualTo("a\\|b\\\\c");
     }
 
     @Test

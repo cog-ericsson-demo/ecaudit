@@ -692,6 +692,7 @@ public class ITVerifyAudit
         List<String> obfuscatedStatements = statements
                 .stream()
                 .map(s -> s.replaceAll("secret", "*****"))
+                .map(s -> s.replace("\n", "\\n"))
                 .collect(Collectors.toList());
 
         List<String> expectedLogPairs = new ArrayList<>();
