@@ -77,6 +77,13 @@ public class DefaultAuditor implements Auditor
         }
     }
 
+    @Override
+    public void auditUnfiltered(AuditEntry logEntry)
+    {
+        AuditEntry obfuscatedEntry = obfuscator.obfuscate(logEntry);
+        performAudit(obfuscatedEntry);
+    }
+
     private boolean shouldAudit(AuditEntry logEntry)
     {
         long start = System.nanoTime();

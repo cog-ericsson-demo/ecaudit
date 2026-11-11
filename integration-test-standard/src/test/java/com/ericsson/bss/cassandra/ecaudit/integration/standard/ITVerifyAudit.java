@@ -210,6 +210,24 @@ public class ITVerifyAudit
         }
     }
 
+    @Test
+    public void testAuthenticateWhitelistedUserRejectIsLogged()
+    {
+        assertThatExceptionOfType(AllNodesFailedException.class)
+        .isThrownBy(() -> cdt.createSession("foo", "wrong_password"));
+
+        ArgumentCaptor<ILoggingEvent> loggingEventCaptor = ArgumentCaptor.forClass(ILoggingEvent.class);
+        verify(mockAuditAppender, atLeast(2)).doAppend(loggingEventCaptor.capture());
+        List<ILoggingEvent> loggingEvents = loggingEventCaptor.getAllValues();
+        assertThat(loggingEvents
+                .stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .collect(Collectors.toList()))
+                        .contains(
+                                "client:'127.0.0.1'|user:'foo'|status:'ATTEMPT'|operation:'Authentication attempt'",
+                                "client:'127.0.0.1'|user:'foo'|status:'FAILED'|operation:'Authentication failed'");
+    }
+
     @Test(expected = AllNodesFailedException.class)
     public void testAuthenticateUserRejectIsLogged()
     {

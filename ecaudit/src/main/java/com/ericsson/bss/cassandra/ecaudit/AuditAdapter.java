@@ -225,6 +225,28 @@ public class AuditAdapter
      */
     public void auditAuth(String userName, InetAddress clientIp, String subject, Status status, long timestamp)
     {
+        auditAuth(userName, clientIp, subject, status, timestamp, true);
+    }
+
+    /**
+     * Audit an authentication attempt where the claimed identity could not be verified.
+     *
+     * The record bypasses the audit whitelist since the user name is only claimed by the client.
+     *
+     * @param userName  the user that failed to authenticate
+     * @param clientIp  the address of the client that tries to authenticate
+     * @param subject   the subject to authenticate, may be {@code null}
+     * @param status    the status of the operation
+     * @param timestamp the system timestamp for the request
+     * @throws AuthenticationException if the audit operation could not be performed
+     */
+    public void auditUnverifiedAuth(String userName, InetAddress clientIp, String subject, Status status, long timestamp)
+    {
+        auditAuth(userName, clientIp, subject, status, timestamp, false);
+    }
+
+    private void auditAuth(String userName, InetAddress clientIp, String subject, Status status, long timestamp, boolean whitelistable)
+    {
         if (auditor.shouldLogForStatus(status))
         {
             AuditEntry logEntry = entryBuilderFactory.createAuthenticationEntryBuilder()
@@ -239,7 +261,14 @@ public class AuditAdapter
 
             try
             {
-                auditor.audit(logEntry);
+                if (whitelistable)
+                {
+                    auditor.audit(logEntry);
+                }
+                else
+                {
+                    auditor.auditUnfiltered(logEntry);
+                }
             }
             catch (RequestExecutionException e)
             {

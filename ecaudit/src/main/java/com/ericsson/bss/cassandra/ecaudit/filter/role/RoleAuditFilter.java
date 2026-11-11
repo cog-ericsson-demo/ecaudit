@@ -24,7 +24,9 @@ import com.google.common.util.concurrent.UncheckedExecutionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.ericsson.bss.cassandra.ecaudit.auth.ConnectionResource;
 import com.ericsson.bss.cassandra.ecaudit.auth.WhitelistDataAccess;
+import com.ericsson.bss.cassandra.ecaudit.common.record.Status;
 import com.ericsson.bss.cassandra.ecaudit.entry.AuditEntry;
 import com.ericsson.bss.cassandra.ecaudit.filter.AuditFilter;
 import com.ericsson.bss.cassandra.ecaudit.utils.Exceptions;
@@ -90,12 +92,20 @@ public class RoleAuditFilter implements AuditFilter
      * Grants-based white-list requires not only the resource to be white-listed, but also that the user/role have
      * authorization to perform the operation on that resource to exempt audit logging.
      *
+     * Failed authentication attempts are never whitelisted.
+     *
      * @param logEntry the log entry specifying the primary role as well as operation and resource
      * @return true if the operation is white-listed, false otherwise
      */
     @Override
     public boolean isWhitelisted(AuditEntry logEntry)
     {
+        // Failed authentications are for a claimed, unverified, user and must always be audit logged
+        if (logEntry.getResource() instanceof ConnectionResource && logEntry.getStatus() == Status.FAILED)
+        {
+            return false;
+        }
+
         try
         {
             return isWhitelistedMaybeUnavailable(logEntry);

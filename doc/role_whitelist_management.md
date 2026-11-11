@@ -184,6 +184,8 @@ Since this resource type is specific to ecAudit, there is no corresponding permi
 
 Connection resources can only be whitelisted on the __EXECUTE__ operation.
 If whitelisted, no audit record will be created when that user connects to the cluster.
+Failed connection attempts are always audit logged, even for whitelisted users,
+since the user name of a failed attempt is only claimed by the client and never verified.
 For example:
 
 ```SQL

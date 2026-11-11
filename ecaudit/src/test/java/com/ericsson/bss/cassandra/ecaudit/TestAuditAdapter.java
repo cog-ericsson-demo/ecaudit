@@ -77,6 +77,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -382,6 +383,51 @@ public class TestAuditAdapter
         assertThat(entry.getResource()).isEqualTo(resource);
         assertThat(entry.getTimestamp()).isEqualTo(TIMESTAMP);
         assertThat(entry.getSubject()).isEqualTo(Optional.of(expectedSubject));
+    }
+
+    @Test
+    public void testProcessUnverifiedAuthBypassesFilter()
+    {
+        // Given
+        AuditEntry.Builder auditBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(ConnectionResource.root());
+        when(mockAuditEntryBuilderFactory.createAuthenticationEntryBuilder()).thenReturn(auditBuilder);
+
+        // When
+        auditAdapter.auditUnverifiedAuth(USER, clientAddress, null, Status.FAILED, TIMESTAMP);
+
+        // Then
+        ArgumentCaptor<AuditEntry> captor = ArgumentCaptor.forClass(AuditEntry.class);
+        verify(mockAuditor, times(1)).auditUnfiltered(captor.capture());
+        verify(mockAuditor, never()).audit(any(AuditEntry.class));
+        AuditEntry entry = captor.getValue();
+        assertThat(entry.getUser()).isEqualTo(USER);
+        assertThat(entry.getStatus()).isEqualTo(Status.FAILED);
+        assertThat(entry.getOperation().getOperationString()).isEqualTo("Authentication failed");
+        assertThat(entry.getResource()).isEqualTo(ConnectionResource.root());
+        assertThat(entry.getSubject()).isEmpty();
+    }
+
+    @Test
+    public void testProcessUnverifiedAuthNoLogTimeStrategy()
+    {
+        // Given
+        when(mockAuditor.shouldLogForStatus(any(Status.class))).thenReturn(false);
+        // When
+        auditAdapter.auditUnverifiedAuth(USER, clientAddress, null, Status.ATTEMPT, TIMESTAMP);
+        // Then
+        verifyNoMoreInteractions(mockAuditor, mockAuditEntryBuilderFactory);
+    }
+
+    @Test
+    public void testProcessUnverifiedAuthException()
+    {
+        AuditEntry.Builder entryBuilder = AuditEntry.newBuilder().permissions(PERMISSIONS).resource(ConnectionResource.root());
+        when(mockAuditEntryBuilderFactory.createAuthenticationEntryBuilder()).thenReturn(entryBuilder);
+
+        doThrow(new ReadTimeoutException(ConsistencyLevel.QUORUM, 3, 4, true)).when(mockAuditor).auditUnfiltered(any(AuditEntry.class));
+
+        assertThatExceptionOfType(AuthenticationException.class)
+        .isThrownBy(() -> auditAdapter.auditUnverifiedAuth(USER, clientAddress, null, Status.FAILED, TIMESTAMP));
     }
 
     @Test
