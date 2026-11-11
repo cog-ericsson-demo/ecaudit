@@ -70,4 +70,10 @@ public class TestConnectionResource
                       .usingGetClass()
                       .verify();
     }
+
+    @Test
+    public void testRootToString()
+    {
+        assertThat(ConnectionResource.root()).hasToString("<all connections>");
+    }
 }

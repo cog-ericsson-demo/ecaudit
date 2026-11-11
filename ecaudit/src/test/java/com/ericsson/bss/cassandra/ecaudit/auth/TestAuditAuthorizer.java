@@ -37,12 +37,14 @@ import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.auth.PermissionDetails;
 import org.apache.cassandra.auth.RoleResource;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.assertj.core.api.Java6Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -249,5 +251,26 @@ public class TestAuditAuthorizer
         AuditConfig auditConfig = mock(AuditConfig.class);
         when(auditConfig.getWrappedAuthorizer()).thenReturn("org.apache.cassandra.auth.AllowAllAuthorizer");
         return auditConfig;
+    }
+
+    @Test
+    public void testGetWrappedAuthorizer()
+    {
+        assertThat(authorizer.getWrappedAuthorizer()).isSameAs(mockAuthorizer);
+    }
+
+    @Test
+    public void testDefaultConstructorUsesConfiguredAuthorizer()
+    {
+        AuditConfig auditConfig = givenConfigHasAllowAllAuthorizer();
+
+        try (MockedStatic<AuditConfig> auditConfigStatic = mockStatic(AuditConfig.class))
+        {
+            auditConfigStatic.when(AuditConfig::getInstance).thenReturn(auditConfig);
+
+            AuditAuthorizer defaultAuthorizer = new AuditAuthorizer();
+
+            assertThat(defaultAuthorizer.getWrappedAuthorizer()).isInstanceOf(AllowAllAuthorizer.class);
+        }
     }
 }

@@ -26,6 +26,7 @@ import org.junit.runner.RunWith;
 
 import com.ericsson.bss.cassandra.ecaudit.test.mode.ClientInitializer;
 import org.apache.cassandra.auth.AuthenticatedUser;
+import org.apache.cassandra.auth.IAuthorizer;
 import org.apache.cassandra.auth.IRoleManager;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.auth.RoleOptions;
@@ -39,6 +40,8 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.StrictStubs.class)
@@ -173,6 +176,101 @@ public class TestPermissionChecker
     {
         RoleOptions options = new RoleOptions();
         options.setOption(IRoleManager.Option.OPTIONS, Collections.emptyMap());
+        return options;
+    }
+
+    @Test
+    public void normalUserCanNotChangeLoginOfOtherRole()
+    {
+        AuthenticatedUser performer = givenNormalUser();
+        RoleResource grantee = givenOtherRole();
+        RoleOptions options = givenLoginOptions();
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> permissionChecker.checkAlterRoleAccess(performer, grantee, options))
+        .withMessage("User normal is not authorized to alter role other");
+    }
+
+    @Test
+    public void normalUserCanNotChangeOwnSuperuserStatus()
+    {
+        AuthenticatedUser performer = givenNormalUser();
+        RoleResource grantee = givenNormalRole();
+        RoleOptions options = givenSuperuserOptions();
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> permissionChecker.checkAlterRoleAccess(performer, grantee, options));
+    }
+
+    @Test
+    public void trustedUserCanChangeOwnSuperuserStatus()
+    {
+        AuthenticatedUser performer = givenTrustedUser();
+        RoleResource grantee = RoleResource.role("trusted");
+        RoleOptions options = givenSuperuserOptions();
+
+        permissionChecker.checkAlterRoleAccess(performer, grantee, options);
+    }
+
+    @Test
+    public void plainAuthorizerPermissionsAreUsed()
+    {
+        IAuthorizer plainAuthorizer = mock(IAuthorizer.class);
+        AuthenticatedUser performer = givenNormalUser();
+        when(plainAuthorizer.authorize(eq(performer), any(RoleResource.class))).thenReturn(EnumSet.of(Permission.ALTER));
+        PermissionChecker checker = new PermissionChecker(plainAuthorizer);
+
+        checker.checkAlterRoleAccess(performer, givenOtherRole(), givenAllOptions());
+
+        verify(plainAuthorizer).authorize(eq(performer), eq(givenOtherRole()));
+    }
+
+    @Test
+    public void plainAuthorizerWithoutAlterPermissionIsRejected()
+    {
+        IAuthorizer plainAuthorizer = mock(IAuthorizer.class);
+        AuthenticatedUser performer = givenNormalUser();
+        when(plainAuthorizer.authorize(eq(performer), any(RoleResource.class))).thenReturn(EnumSet.of(Permission.SELECT));
+        PermissionChecker checker = new PermissionChecker(plainAuthorizer);
+
+        assertThatExceptionOfType(UnauthorizedException.class)
+        .isThrownBy(() -> checker.checkAlterRoleAccess(performer, givenOtherRole(), givenAllOptions()));
+    }
+
+    @Test
+    public void defaultConstructorLazilyUsesConfiguredAuthorizer()
+    {
+        IAuthorizer originalAuthorizer = DatabaseDescriptor.getAuthorizer();
+        IAuthorizer configuredAuthorizer = mock(IAuthorizer.class);
+        AuthenticatedUser performer = givenNormalUser();
+        when(configuredAuthorizer.authorize(eq(performer), any(RoleResource.class))).thenReturn(EnumSet.of(Permission.ALTER));
+        DatabaseDescriptor.setAuthorizer(configuredAuthorizer);
+        try
+        {
+            PermissionChecker checker = new PermissionChecker();
+
+            checker.checkAlterRoleAccess(performer, givenOtherRole(), givenAllOptions());
+            checker.checkAlterRoleAccess(performer, givenOtherRole(), givenAllOptions());
+        }
+        finally
+        {
+            DatabaseDescriptor.setAuthorizer(originalAuthorizer);
+        }
+
+        verify(configuredAuthorizer, times(2)).authorize(eq(performer), eq(givenOtherRole()));
+    }
+
+    private RoleOptions givenLoginOptions()
+    {
+        RoleOptions options = new RoleOptions();
+        options.setOption(IRoleManager.Option.LOGIN, true);
+        return options;
+    }
+
+    private RoleOptions givenSuperuserOptions()
+    {
+        RoleOptions options = new RoleOptions();
+        options.setOption(IRoleManager.Option.SUPERUSER, true);
         return options;
     }
 }
