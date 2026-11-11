@@ -15,7 +15,10 @@
  */
 package com.ericsson.bss.cassandra.ecaudit.common.formatter;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
 
 /**
  * Escapes client controlled field values before they are written to a log or a terminal.
@@ -53,8 +56,8 @@ public final class FieldEscaper
     }
 
     /**
-     * Escape the given characters/strings with a backslash, escaping backslash itself first.
-     * The characters are matched literally.
+     * Escape the given characters/strings with a backslash, escaping backslash itself as well.
+     * The characters are matched literally in a single pass, preferring the longest match.
      *
      * @param value            the value to escape, may be {@code null}
      * @param escapeCharacters characters/strings to escape, if empty the value is returned unchanged
@@ -66,16 +69,45 @@ public final class FieldEscaper
         {
             return value;
         }
-        String backslash = String.valueOf(BACKSLASH);
-        String escaped = value.replace(backslash, backslash + backslash);
-        for (String escapeCharacter : escapeCharacters)
+        List<String> candidates = new ArrayList<>(escapeCharacters);
+        candidates.removeIf(String::isEmpty);
+        candidates.sort(Comparator.comparingInt(String::length).reversed());
+
+        StringBuilder builder = new StringBuilder(value.length() + 16);
+        int i = 0;
+        while (i < value.length())
         {
-            if (!escapeCharacter.isEmpty() && !backslash.equals(escapeCharacter))
+            if (value.charAt(i) == BACKSLASH)
             {
-                escaped = escaped.replace(escapeCharacter, backslash + escapeCharacter);
+                builder.append(BACKSLASH).append(BACKSLASH);
+                i++;
+                continue;
+            }
+            String match = findMatch(value, i, candidates);
+            if (match == null)
+            {
+                builder.append(value.charAt(i));
+                i++;
+            }
+            else
+            {
+                builder.append(BACKSLASH).append(match);
+                i += match.length();
             }
         }
-        return escaped;
+        return builder.toString();
+    }
+
+    private static String findMatch(String value, int offset, List<String> candidates)
+    {
+        for (String candidate : candidates)
+        {
+            if (value.startsWith(candidate, offset))
+            {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     /**

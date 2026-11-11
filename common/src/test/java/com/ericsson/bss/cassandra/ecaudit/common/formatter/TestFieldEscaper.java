@@ -72,4 +72,12 @@ public class TestFieldEscaper
     {
         assertThat(FieldEscaper.escape("x\n1|2\u001b", Collections.singleton("|"))).isEqualTo("x\\n1\\|2\\u001b");
     }
+
+    @Test
+    public void testOverlappingEscapeCharactersAreEscapedOnce()
+    {
+        assertThat(FieldEscaper.escapeCharacters("ab", Arrays.asList("ab", "a"))).isEqualTo("\\ab");
+        assertThat(FieldEscaper.escapeCharacters("ab", Arrays.asList("a", "ab"))).isEqualTo("\\ab");
+        assertThat(FieldEscaper.escapeCharacters("a|ab", Arrays.asList("a", "ab", "|"))).isEqualTo("\\a\\|\\ab");
+    }
 }
